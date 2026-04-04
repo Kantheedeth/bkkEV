@@ -107,6 +107,39 @@ function getNeedScoreColor(score) {
   return '#22c55e';
 }
 
+function getNeedLevel(score) {
+  if (score >= 80) return 'Critical need';
+  if (score >= 60) return 'High need';
+  if (score >= 40) return 'Moderate need';
+  return 'Lower priority';
+}
+
+function getStrongestNeedDriver(district) {
+  const drivers = [
+    {
+      score: district.popScore,
+      label: 'Large population',
+      description: 'Population pressure is the strongest reason for adding chargers here.',
+    },
+    {
+      score: district.coverageScore,
+      label: 'Low charger coverage',
+      description: 'This district has fewer chargers per km² than most areas in scope.',
+    },
+    {
+      score: district.bufferScore,
+      label: 'Far from existing stations',
+      description: 'The nearest existing charger is relatively far from this district.',
+    },
+  ];
+
+  return drivers.sort((a, b) => b.score - a.score)[0];
+}
+
+function formatDistanceKm(value) {
+  return Number.isFinite(value) ? `${value.toFixed(1)} km` : 'N/A';
+}
+
 function haversineKm(lat1, lng1, lat2, lng2) {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -197,6 +230,7 @@ function computeDistrictScores(districtData, stations) {
         popScore: Math.round(popScore),
         coverageScore: Math.round(coverageScore),
         bufferScore: Math.round(bufferScore),
+        nearestStationKm: nearestDist,
         needScore,
       };
     })
@@ -209,7 +243,7 @@ function createPulsingIcon(rank) {
     html: `<div class="pulsing-pin"><span class="pulsing-pin-rank">#${rank}</span></div>`,
     iconAnchor: [20, 20],
     iconSize: [40, 40],
-    popupAnchor: [0, -24],
+    popupAnchor: [0, -64],
   });
 }
 
@@ -431,12 +465,28 @@ function RecommendationDistrictLayer({ districtData, scoredDistricts }) {
         };
       }}
       onEachFeature={(feature, layer) => {
+        const district = scoredDistricts.find((item) => item.feature.properties.fid === feature.properties.fid);
         const score = scoreMap.get(feature.properties.fid) ?? 0;
         const name = getDistrictName(feature.properties);
-        layer.bindTooltip(`${name} — Score: ${score}/100`, {
+        layer.bindTooltip(`${name} • ${getNeedLevel(score)} (${score}/100)`, {
           className: 'district-label district-label-small',
           sticky: true,
         });
+        if (district) {
+          const strongestDriver = getStrongestNeedDriver(district);
+          layer.bindPopup(`
+            <div class="district-popup">
+              <h3>${name}</h3>
+              <p>${getNeedLevel(score)} for additional charging stations</p>
+              <dl>
+                <div><dt>Need score</dt><dd>${district.needScore}/100</dd></div>
+                <div><dt>Main reason</dt><dd>${strongestDriver.label}</dd></div>
+                <div><dt>Nearest station</dt><dd>${formatDistanceKm(district.nearestStationKm)}</dd></div>
+                <div><dt>Existing stations</dt><dd>${formatInteger(district.noOfCounted)}</dd></div>
+              </dl>
+            </div>
+          `);
+        }
         layer.on({
           mouseover: () => {
             layer.setStyle({ weight: 2.4, fillOpacity: 0.8 });
@@ -457,24 +507,33 @@ function RecommendationDistrictLayer({ districtData, scoredDistricts }) {
   );
 }
 
-function RecommendedPinsLayer({ top5, markerRefs }) {
-  const icons = useMemo(() => top5.map((_, i) => createPulsingIcon(i + 1)), [top5]);
+function RecommendedPinsLayer({ recommendations, markerRefs }) {
+  const icons = useMemo(
+    () => recommendations.map((_, i) => createPulsingIcon(i + 1)),
+    [recommendations]
+  );
 
-  return top5.map((d, i) => (
+  return recommendations.map((d, i) => (
     <Marker
       key={`rec-pin-${i}`}
       position={d.centroid}
       icon={icons[i]}
       ref={(el) => { markerRefs.current[i] = el; }}
     >
-      <Popup>
+      <Popup offset={[0, -56]}>
         <div className="station-popup">
           <h3>Recommended #{i + 1}</h3>
-          <p>{d.name}</p>
+          <p>
+            {d.name}
+            <br />
+            {getNeedLevel(d.needScore)}
+          </p>
           <dl>
             <div><dt>Need score</dt><dd>{d.needScore}/100</dd></div>
+            <div><dt>Main reason</dt><dd>{getStrongestNeedDriver(d).label}</dd></div>
             <div><dt>Population</dt><dd>{d.population.toLocaleString()}</dd></div>
             <div><dt>Existing stations</dt><dd>{d.noOfCounted}</dd></div>
+            <div><dt>Nearest station</dt><dd>{formatDistanceKm(d.nearestStationKm)}</dd></div>
             <div><dt>Area</dt><dd>{d.areaKm2.toFixed(1)} km²</dd></div>
           </dl>
         </div>
@@ -529,7 +588,14 @@ function App() {
     () => computeDistrictScores(districtData, stations),
     [districtData, stations]
   );
-  const top5 = useMemo(() => scoredDistricts.slice(0, 5), [scoredDistricts]);
+  const criticalRecommendations = useMemo(
+    () => scoredDistricts.filter((district) => district.needScore >= 80),
+    [scoredDistricts]
+  );
+  const criticalCount = useMemo(
+    () => scoredDistricts.filter((district) => district.needScore >= 80).length,
+    [scoredDistricts]
+  );
 
   const isDistrictMode = mapMode === MAP_MODES.DISTRICTS;
   const isStationMode = mapMode === MAP_MODES.STATIONS;
@@ -549,13 +615,11 @@ function App() {
           <span className="eyebrow">EV deployment decision support</span>
           <h1>Bangkok metropolitan charging station planning tool</h1>
 
-          {!isRecommendationMode && (
-            <p>
-              This map is designed to support charging station deployment decisions across Bangkok,
-              nearby provinces, and selected surrounding districts. Use district mode to compare
-              demand coverage and station mode to inspect the current charging network.
-            </p>
-          )}
+          <p>
+            This map is designed to support charging station deployment decisions across Bangkok,
+            nearby provinces, and selected surrounding districts. Use district mode to compare
+            demand coverage and station mode to inspect the current charging network.
+          </p>
 
           <p className="scope-note">
             Covered area: Bangkok, Pathum Thani, Samut Prakan, and Nonthaburi.
@@ -658,73 +722,30 @@ function App() {
           {/* ── Recommendation panel ── */}
           {isRecommendationMode && (
             <div className="rec-panel">
-              <h2 className="rec-panel-title">📍 Recommended New Stations</h2>
+              <p className="rec-panel-kicker">Recommendation mode</p>
+              <h2 className="rec-panel-title">Critical districts for new charging stations</h2>
+              <p className="rec-panel-intro">
+                The map shows need across all districts. The right-side cards focus only on
+                critical districts.
+              </p>
 
               {scoredDistricts.length === 0 ? (
                 <p className="status-message">Calculating scores…</p>
               ) : (
-                <ol className="rec-list">
-                  {top5.map((d, i) => (
-                    <li
-                      key={d.feature.properties.fid}
-                      className="rec-item"
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => handleListItemClick(d, i)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleListItemClick(d, i)}
-                    >
-                      <div className="rec-item-header">
-                        <span className="rec-rank">#{i + 1}</span>
-                        <span className="rec-name">{d.name}</span>
-                        <span
-                          className="rec-score-badge"
-                          style={{ backgroundColor: getNeedScoreColor(d.needScore) }}
-                        >
-                          {d.needScore}
-                        </span>
-                      </div>
-                      <div className="rec-bar-track">
-                        <div
-                          className="rec-bar-fill"
-                          style={{
-                            width: `${d.needScore}%`,
-                            backgroundColor: getNeedScoreColor(d.needScore),
-                          }}
-                        />
-                      </div>
-                      <div className="rec-pills">
-                        <span className="rec-pill">👥 Pop {d.popScore}</span>
-                        <span className="rec-pill">📡 Cov {d.coverageScore}</span>
-                        <span className="rec-pill">🔵 Buf {d.bufferScore}</span>
-                      </div>
-                    </li>
-                  ))}
-                </ol>
+                <div className="rec-summary-strip">
+                  <div className="rec-summary-chip rec-summary-chip-strong">
+                    <span className="rec-summary-label">Critical districts</span>
+                    <strong>{criticalCount}</strong>
+                    <span>Need score 80+</span>
+                  </div>
+                  <div className="rec-summary-chip">
+                    <span className="rec-summary-label">Shown on map</span>
+                    <strong>{criticalRecommendations.length}</strong>
+                    <span>All critical districts</span>
+                  </div>
+                </div>
               )}
 
-              <details className="rec-formula">
-                <summary>How is this calculated?</summary>
-                <div className="rec-formula-body">
-                  <p>
-                    Each district receives a <strong>Need Score</strong> (0–100) from three
-                    factors:
-                  </p>
-                  <ul>
-                    <li>
-                      <strong>Population (40%)</strong> — more residents = higher priority
-                    </li>
-                    <li>
-                      <strong>Coverage gap (40%)</strong> — fewer chargers per km² = higher
-                      priority
-                    </li>
-                    <li>
-                      <strong>Buffer zone (20%)</strong> — if the nearest existing charger is
-                      &gt;1.5 km away, the district scores higher
-                    </li>
-                  </ul>
-                  <code>Score = (Pop × 0.4) + (Coverage × 0.4) + (Buffer × 0.2)</code>
-                </div>
-              </details>
             </div>
           )}
         </header>
@@ -781,25 +802,105 @@ function App() {
             )}
             {isDistrictMode && <PassiveStationLayer stations={stations} />}
             {isRecommendationMode && (
-              <RecommendedPinsLayer top5={top5} markerRefs={markerRefs} />
+              <RecommendedPinsLayer
+                recommendations={criticalRecommendations}
+                markerRefs={markerRefs}
+              />
             )}
           </Pane>
         </MapContainer>
 
-        {/* ── Need score map legend (bottom-left overlay) ── */}
         {isRecommendationMode && (
-          <div className="need-score-legend">
-            <p className="need-score-legend-title">Need score</p>
-            <ul className="need-score-legend-list">
-              {NEED_SCORE_LEGEND.map((item) => (
-                <li key={item.label}>
-                  <i className="need-score-legend-swatch" style={{ backgroundColor: item.color }} />
-                  <span>{item.label}</span>
-                </li>
-              ))}
-            </ul>
+          <div className="rec-overlay-stack">
+            <aside className="rec-info-box rec-info-overlay" aria-label="How recommendation rating works">
+              <div className="rec-info-section">
+                <h3 className="rec-info-title">How rating works</h3>
+                <p className="rec-info-text">
+                  Each district receives a <strong>Need Score</strong> from 0 to 100. Higher scores
+                  indicate districts that are more likely to need additional charging stations.
+                </p>
+                <ul className="rec-info-list">
+                  <li><strong>Population (40%)</strong>: more residents increase priority.</li>
+                  <li><strong>Coverage gap (40%)</strong>: fewer chargers per km² increase priority.</li>
+                  <li><strong>Buffer zone (20%)</strong>: districts farther than 1.5 km from the nearest station rank higher.</li>
+                </ul>
+                <code className="rec-info-code">
+                  Need Score = (Population x 0.4) + (Coverage x 0.4) + (Buffer x 0.2)
+                </code>
+              </div>
+
+              <div className="rec-info-section">
+                <h3 className="rec-info-title">Color meaning</h3>
+                <ul className="rec-color-list">
+                  {NEED_SCORE_LEGEND.map((item) => (
+                    <li key={item.label}>
+                      <i className="rec-color-swatch" style={{ backgroundColor: item.color }} />
+                      <span>{item.label}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </aside>
+
+            <aside className="rec-side-card rec-list-overlay" aria-label="Critical district list">
+              <h3 className="rec-side-title">Critical districts</h3>
+              {criticalRecommendations.length === 0 ? (
+                <p className="rec-side-empty">No districts are currently in the critical range.</p>
+              ) : (
+                <div className="rec-list-scroll">
+                  <ol className="rec-list">
+                  {criticalRecommendations.map((d, i) => {
+                    const strongestDriver = getStrongestNeedDriver(d);
+                    return (
+                      <li
+                        key={d.feature.properties.fid}
+                        className="rec-item"
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => handleListItemClick(d, i)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleListItemClick(d, i)}
+                      >
+                        <div className="rec-item-header">
+                          <span className="rec-rank">#{i + 1}</span>
+                          <div className="rec-title-block">
+                            <span className="rec-name">{d.name}</span>
+                            <span className="rec-subtitle">
+                              {getNeedLevel(d.needScore)} • {strongestDriver.label}
+                            </span>
+                          </div>
+                          <span
+                            className="rec-score-badge"
+                            style={{ backgroundColor: getNeedScoreColor(d.needScore) }}
+                          >
+                            {d.needScore}/100
+                          </span>
+                        </div>
+                        <div className="rec-bar-track">
+                          <div
+                            className="rec-bar-fill"
+                            style={{
+                              width: `${d.needScore}%`,
+                              backgroundColor: getNeedScoreColor(d.needScore),
+                            }}
+                          />
+                        </div>
+                        <div className="rec-metrics">
+                          <span className="rec-pill">Pop {d.popScore}</span>
+                          <span className="rec-pill">Coverage {d.coverageScore}</span>
+                          <span className="rec-pill">Buffer {d.bufferScore}</span>
+                          <span className="rec-pill">{formatDistanceKm(d.nearestStationKm)} away</span>
+                          <span className="rec-action-hint">View on map</span>
+                        </div>
+                      </li>
+                    );
+                  })}
+                  </ol>
+                </div>
+              )}
+            </aside>
           </div>
         )}
+
       </section>
     </main>
   );

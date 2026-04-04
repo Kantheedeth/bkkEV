@@ -4,6 +4,7 @@ import {
   CircleMarker,
   GeoJSON,
   MapContainer,
+  Marker,
   Pane,
   Popup,
   TileLayer,
@@ -19,6 +20,7 @@ import outerBorderDataUrl from './assets/data/outerBorder.geojson?url';
 const MAP_MODES = {
   DISTRICTS: 'districts',
   STATIONS: 'stations',
+  RECOMMENDATION: 'recommendation',
 };
 const BASEMAPS = {
   STREET: 'street',
@@ -32,6 +34,14 @@ const DISTRICT_COVERAGE_LEGEND = [
   { color: '#e9d8a6', label: '0.01 to 3.99' },
   { color: '#f7f7f7', label: '0.00' },
 ];
+const NEED_SCORE_LEGEND = [
+  { color: '#ef4444', label: 'Critical (80–100)' },
+  { color: '#f97316', label: 'High need (60–79)' },
+  { color: '#eab308', label: 'Moderate (40–59)' },
+  { color: '#22c55e', label: 'Well covered (0–39)' },
+];
+
+// ─── Formatters ──────────────────────────────────────────────────────────────
 
 function formatInteger(value) {
   const numericValue = Number(value);
@@ -43,6 +53,8 @@ function formatCoverage(value) {
   return Number.isFinite(numericValue) ? numericValue.toFixed(2) : 'N/A';
 }
 
+// ─── Data helpers ─────────────────────────────────────────────────────────────
+
 function normalizeStations(rawData) {
   return (rawData?.features ?? [])
     .map((feature) => {
@@ -50,11 +62,7 @@ function normalizeStations(rawData) {
         feature.properties ?? {};
       const lat = Number(Latitude);
       const lng = Number(Longitude);
-
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-        return null;
-      }
-
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
       return {
         id: feature.properties?.fid ?? `${Name}-${lat}-${lng}`,
         address: Address || 'No address available',
@@ -82,7 +90,6 @@ function getProvinceName(properties) {
 
 function getCoverageColor(coverage) {
   const value = Number(coverage);
-
   if (!Number.isFinite(value)) return '#d9e2ec';
   if (value >= 12) return '#005f73';
   if (value >= 8) return '#0a9396';
@@ -91,14 +98,129 @@ function getCoverageColor(coverage) {
   return '#f7f7f7';
 }
 
+// ─── Recommendation scoring ───────────────────────────────────────────────────
+
+function getNeedScoreColor(score) {
+  if (score >= 80) return '#ef4444';
+  if (score >= 60) return '#f97316';
+  if (score >= 40) return '#eab308';
+  return '#22c55e';
+}
+
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function findNearestStationDist(centroid, stations) {
+  let min = Infinity;
+  for (const s of stations) {
+    const d = haversineKm(centroid[0], centroid[1], s.lat, s.lng);
+    if (d < min) min = d;
+  }
+  return min === Infinity ? 999 : min;
+}
+
+function computeCentroid(geometry) {
+  let latSum = 0, lngSum = 0, count = 0;
+  const processRing = (ring) => {
+    for (const [lng, lat] of ring) { latSum += lat; lngSum += lng; count++; }
+  };
+  if (geometry.type === 'Polygon') {
+    processRing(geometry.coordinates[0]);
+  } else if (geometry.type === 'MultiPolygon') {
+    for (const poly of geometry.coordinates) processRing(poly[0]);
+  }
+  return count > 0 ? [latSum / count, lngSum / count] : [13.75, 100.5];
+}
+
+function computeAreaKm2(geometry) {
+  const latRad = (13.75 * Math.PI) / 180;
+  const ringArea = (ring) => {
+    let a = 0;
+    for (let i = 0; i < ring.length - 1; i++) {
+      a += ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1];
+    }
+    return (Math.abs(a) / 2) * 111 * 111 * Math.cos(latRad);
+  };
+  if (geometry.type === 'Polygon') return ringArea(geometry.coordinates[0]);
+  if (geometry.type === 'MultiPolygon')
+    return geometry.coordinates.reduce((sum, poly) => sum + ringArea(poly[0]), 0);
+  return 1;
+}
+
+function computeDistrictScores(districtData, stations) {
+  if (!districtData || !stations.length) return [];
+
+  const raw = districtData.features.map((feature) => {
+    const props = feature.properties;
+    const population = Number(props.final_population_english_Population) || 0;
+    const noOfCounted = Number(props.noOfCounted) || 0;
+    const centroid = computeCentroid(feature.geometry);
+    const areaKm2 = Math.max(computeAreaKm2(feature.geometry), 0.1);
+    return {
+      feature,
+      name: getDistrictName(props),
+      population,
+      noOfCounted,
+      centroid,
+      areaKm2,
+      chargersPerKm2: noOfCounted / areaKm2,
+    };
+  });
+
+  const maxPop = Math.max(...raw.map((d) => d.population));
+  const minPop = Math.min(...raw.map((d) => d.population));
+  const maxDensity = Math.max(...raw.map((d) => d.chargersPerKm2));
+
+  return raw
+    .map((d) => {
+      const popScore =
+        maxPop > minPop ? ((d.population - minPop) / (maxPop - minPop)) * 100 : 50;
+      const coverageScore =
+        maxDensity > 0 ? (1 - d.chargersPerKm2 / maxDensity) * 100 : 100;
+      const nearestDist = findNearestStationDist(d.centroid, stations);
+      const bufferScore = nearestDist >= 1.5 ? 100 : (nearestDist / 1.5) * 100;
+      const needScore = Math.min(
+        100,
+        Math.round(popScore * 0.4 + coverageScore * 0.4 + bufferScore * 0.2)
+      );
+      return {
+        ...d,
+        popScore: Math.round(popScore),
+        coverageScore: Math.round(coverageScore),
+        bufferScore: Math.round(bufferScore),
+        needScore,
+      };
+    })
+    .sort((a, b) => b.needScore - a.needScore);
+}
+
+function createPulsingIcon(rank) {
+  return L.divIcon({
+    className: 'pulsing-pin-wrapper',
+    html: `<div class="pulsing-pin"><span class="pulsing-pin-rank">#${rank}</span></div>`,
+    iconAnchor: [20, 20],
+    iconSize: [40, 40],
+    popupAnchor: [0, -24],
+  });
+}
+
+// ─── Map sub-components ───────────────────────────────────────────────────────
+
 function InitializeMapBounds({ districts, stations }) {
   const map = useMap();
   const hasInitializedBounds = useRef(false);
 
   useEffect(() => {
-    if (hasInitializedBounds.current || !districts || !stations.length) {
-      return;
-    }
+    if (hasInitializedBounds.current || !districts || !stations.length) return;
 
     const bounds = L.latLngBounds([]);
     bounds.extend(L.geoJSON(districts).getBounds());
@@ -110,6 +232,27 @@ function InitializeMapBounds({ districts, stations }) {
       hasInitializedBounds.current = true;
     }
   }, [districts, map, stations]);
+
+  return null;
+}
+
+function MapFlyController({ target, markerRefs }) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!target) return;
+    map.flyTo(target.latlng, target.zoom ?? 13, { duration: 1.0 });
+
+    if (target.popupIndex !== undefined) {
+      const onMoveEnd = () => {
+        const marker = markerRefs.current[target.popupIndex];
+        if (marker) marker.openPopup();
+        map.off('moveend', onMoveEnd);
+      };
+      map.on('moveend', onMoveEnd);
+      return () => map.off('moveend', onMoveEnd);
+    }
+  }, [map, target, markerRefs]);
 
   return null;
 }
@@ -174,28 +317,18 @@ function onEachDistrict(feature, layer, zoom, isDistrictMode) {
       permanent: true,
     });
   }
-
   layer.bindPopup(createDistrictPopup(feature.properties));
-
   layer.on({
     mouseover: () => {
-      if (!isDistrictMode) {
-        return;
-      }
-      layer.setStyle({
-        color: '#081c15',
-        weight: 2.4,
-        fillOpacity: 0.5,
-      });
+      if (!isDistrictMode) return;
+      layer.setStyle({ color: '#081c15', weight: 2.4, fillOpacity: 0.5 });
       layer.bringToFront();
     },
     mouseout: () => {
       layer.setStyle(districtStyle(feature, isDistrictMode));
     },
     click: (event) => {
-      if (isDistrictMode) {
-        layer.openPopup(event.latlng);
-      }
+      if (isDistrictMode) layer.openPopup(event.latlng);
     },
   });
 }
@@ -205,9 +338,7 @@ function DistrictLayer({ districtData, isDistrictMode }) {
   const [zoom, setZoom] = useState(map.getZoom());
 
   useMapEvents({
-    zoomend: () => {
-      setZoom(map.getZoom());
-    },
+    zoomend: () => setZoom(map.getZoom()),
   });
 
   return (
@@ -276,6 +407,84 @@ function PassiveStationLayer({ stations }) {
   ));
 }
 
+function RecommendationDistrictLayer({ districtData, scoredDistricts }) {
+  const scoreMap = useMemo(() => {
+    const m = new Map();
+    for (const d of scoredDistricts) {
+      m.set(d.feature.properties.fid, d.needScore);
+    }
+    return m;
+  }, [scoredDistricts]);
+
+  return (
+    <GeoJSON
+      key="rec-districts"
+      data={districtData}
+      interactive
+      style={(feature) => {
+        const score = scoreMap.get(feature.properties.fid) ?? 0;
+        return {
+          color: '#1f3c48',
+          weight: 1.2,
+          fillColor: getNeedScoreColor(score),
+          fillOpacity: 0.6,
+        };
+      }}
+      onEachFeature={(feature, layer) => {
+        const score = scoreMap.get(feature.properties.fid) ?? 0;
+        const name = getDistrictName(feature.properties);
+        layer.bindTooltip(`${name} — Score: ${score}/100`, {
+          className: 'district-label district-label-small',
+          sticky: true,
+        });
+        layer.on({
+          mouseover: () => {
+            layer.setStyle({ weight: 2.4, fillOpacity: 0.8 });
+            layer.bringToFront();
+          },
+          mouseout: () => {
+            const s = scoreMap.get(feature.properties.fid) ?? 0;
+            layer.setStyle({
+              color: '#1f3c48',
+              weight: 1.2,
+              fillColor: getNeedScoreColor(s),
+              fillOpacity: 0.6,
+            });
+          },
+        });
+      }}
+    />
+  );
+}
+
+function RecommendedPinsLayer({ top5, markerRefs }) {
+  const icons = useMemo(() => top5.map((_, i) => createPulsingIcon(i + 1)), [top5]);
+
+  return top5.map((d, i) => (
+    <Marker
+      key={`rec-pin-${i}`}
+      position={d.centroid}
+      icon={icons[i]}
+      ref={(el) => { markerRefs.current[i] = el; }}
+    >
+      <Popup>
+        <div className="station-popup">
+          <h3>Recommended #{i + 1}</h3>
+          <p>{d.name}</p>
+          <dl>
+            <div><dt>Need score</dt><dd>{d.needScore}/100</dd></div>
+            <div><dt>Population</dt><dd>{d.population.toLocaleString()}</dd></div>
+            <div><dt>Existing stations</dt><dd>{d.noOfCounted}</dd></div>
+            <div><dt>Area</dt><dd>{d.areaKm2.toFixed(1)} km²</dd></div>
+          </dl>
+        </div>
+      </Popup>
+    </Marker>
+  ));
+}
+
+// ─── App ──────────────────────────────────────────────────────────────────────
+
 function App() {
   const [districtData, setDistrictData] = useState(null);
   const [outerBorderData, setOuterBorderData] = useState(null);
@@ -283,6 +492,8 @@ function App() {
   const [loadError, setLoadError] = useState('');
   const [mapMode, setMapMode] = useState(MAP_MODES.STATIONS);
   const [basemap, setBasemap] = useState(BASEMAPS.STREET);
+  const [flyTarget, setFlyTarget] = useState(null);
+  const markerRefs = useRef([]);
 
   useEffect(() => {
     async function loadMapData() {
@@ -310,32 +521,52 @@ function App() {
         setLoadError(error instanceof Error ? error.message : 'Failed to load map data.');
       }
     }
-
     loadMapData();
   }, []);
 
   const stations = useMemo(() => normalizeStations(rawStations), [rawStations]);
+  const scoredDistricts = useMemo(
+    () => computeDistrictScores(districtData, stations),
+    [districtData, stations]
+  );
+  const top5 = useMemo(() => scoredDistricts.slice(0, 5), [scoredDistricts]);
+
   const isDistrictMode = mapMode === MAP_MODES.DISTRICTS;
   const isStationMode = mapMode === MAP_MODES.STATIONS;
+  const isRecommendationMode = mapMode === MAP_MODES.RECOMMENDATION;
   const isStreetBasemap = basemap === BASEMAPS.STREET;
+
+  function handleListItemClick(d, i) {
+    setFlyTarget({ latlng: d.centroid, zoom: 13, popupIndex: i, _ts: Date.now() });
+  }
 
   return (
     <main className="app-shell">
       <section className="map-frame">
-        <header className="map-intro">
+        <header className={`map-intro${isRecommendationMode ? ' rec-mode' : ''}`}>
+
+          {/* ── Always-visible header ── */}
           <span className="eyebrow">EV deployment decision support</span>
           <h1>Bangkok metropolitan charging station planning tool</h1>
-          <p>
-            This map is designed to support charging station deployment decisions across Bangkok,
-            nearby provinces, and selected surrounding districts. Use district mode to compare
-            demand coverage and station mode to inspect the current charging network.
-          </p>
+
+          {!isRecommendationMode && (
+            <p>
+              This map is designed to support charging station deployment decisions across Bangkok,
+              nearby provinces, and selected surrounding districts. Use district mode to compare
+              demand coverage and station mode to inspect the current charging network.
+            </p>
+          )}
+
           <p className="scope-note">
             Covered area: Bangkok, Pathum Thani, Samut Prakan, and Nonthaburi.
           </p>
+
+          {/* ── Mode tabs ── */}
           <div className="mode-switch" role="tablist" aria-label="Map display mode">
             <button
               type="button"
+              role="tab"
+              aria-selected={isStationMode}
               className={isStationMode ? 'mode-button active' : 'mode-button'}
               onClick={() => setMapMode(MAP_MODES.STATIONS)}
             >
@@ -343,12 +574,25 @@ function App() {
             </button>
             <button
               type="button"
+              role="tab"
+              aria-selected={isDistrictMode}
               className={isDistrictMode ? 'mode-button active' : 'mode-button'}
               onClick={() => setMapMode(MAP_MODES.DISTRICTS)}
             >
               District mode
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={isRecommendationMode}
+              className={isRecommendationMode ? 'mode-button active rec-tab' : 'mode-button'}
+              onClick={() => setMapMode(MAP_MODES.RECOMMENDATION)}
+            >
+              Recommendation
+            </button>
           </div>
+
+          {/* ── Basemap switch ── */}
           <div className="mode-switch basemap-switch" role="tablist" aria-label="Basemap style">
             <button
               type="button"
@@ -365,11 +609,13 @@ function App() {
               Satellite
             </button>
           </div>
+
+          {/* ── Status messages ── */}
           {loadError ? <p className="status-message error">{loadError}</p> : null}
           {!loadError && (!districtData || !stations.length) ? (
             <p className="status-message">Loading district borders and EV stations...</p>
           ) : null}
-          {districtData && stations.length ? (
+          {districtData && stations.length && !isRecommendationMode ? (
             <p className="status-message">
               {formatInteger(districtData.features.length)} districts in scope and{' '}
               {formatInteger(stations.length)} charging stations loaded.{' '}
@@ -378,33 +624,109 @@ function App() {
                 : 'District mode is for area comparison and coverage review.'}
             </p>
           ) : null}
-          <div className="legend">
-            <span>
-              <i className="legend-swatch district-swatch" />
-              District coverage
-            </span>
-            <span>
-              <i className="legend-swatch station-swatch" />
-              Existing charging stations
-            </span>
-          </div>
-          {isDistrictMode ? (
+
+          {/* ── Standard legend (station / district modes) ── */}
+          {!isRecommendationMode && (
+            <div className="legend">
+              <span>
+                <i className="legend-swatch district-swatch" />
+                District coverage
+              </span>
+              <span>
+                <i className="legend-swatch station-swatch" />
+                Existing charging stations
+              </span>
+            </div>
+          )}
+
+          {/* ── District coverage scale ── */}
+          {isDistrictMode && (
             <div className="coverage-legend">
               <p className="coverage-legend-title">District coverage scale</p>
               <p className="coverage-legend-subtitle">Stations per 10,000 people</p>
               <ul className="coverage-legend-list">
                 {DISTRICT_COVERAGE_LEGEND.map((item) => (
                   <li key={item.label}>
-                    <i
-                      className="coverage-legend-swatch"
-                      style={{ backgroundColor: item.color }}
-                    />
+                    <i className="coverage-legend-swatch" style={{ backgroundColor: item.color }} />
                     <span>{item.label}</span>
                   </li>
                 ))}
               </ul>
             </div>
-          ) : null}
+          )}
+
+          {/* ── Recommendation panel ── */}
+          {isRecommendationMode && (
+            <div className="rec-panel">
+              <h2 className="rec-panel-title">📍 Recommended New Stations</h2>
+
+              {scoredDistricts.length === 0 ? (
+                <p className="status-message">Calculating scores…</p>
+              ) : (
+                <ol className="rec-list">
+                  {top5.map((d, i) => (
+                    <li
+                      key={d.feature.properties.fid}
+                      className="rec-item"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => handleListItemClick(d, i)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleListItemClick(d, i)}
+                    >
+                      <div className="rec-item-header">
+                        <span className="rec-rank">#{i + 1}</span>
+                        <span className="rec-name">{d.name}</span>
+                        <span
+                          className="rec-score-badge"
+                          style={{ backgroundColor: getNeedScoreColor(d.needScore) }}
+                        >
+                          {d.needScore}
+                        </span>
+                      </div>
+                      <div className="rec-bar-track">
+                        <div
+                          className="rec-bar-fill"
+                          style={{
+                            width: `${d.needScore}%`,
+                            backgroundColor: getNeedScoreColor(d.needScore),
+                          }}
+                        />
+                      </div>
+                      <div className="rec-pills">
+                        <span className="rec-pill">👥 Pop {d.popScore}</span>
+                        <span className="rec-pill">📡 Cov {d.coverageScore}</span>
+                        <span className="rec-pill">🔵 Buf {d.bufferScore}</span>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              )}
+
+              <details className="rec-formula">
+                <summary>How is this calculated?</summary>
+                <div className="rec-formula-body">
+                  <p>
+                    Each district receives a <strong>Need Score</strong> (0–100) from three
+                    factors:
+                  </p>
+                  <ul>
+                    <li>
+                      <strong>Population (40%)</strong> — more residents = higher priority
+                    </li>
+                    <li>
+                      <strong>Coverage gap (40%)</strong> — fewer chargers per km² = higher
+                      priority
+                    </li>
+                    <li>
+                      <strong>Buffer zone (20%)</strong> — if the nearest existing charger is
+                      &gt;1.5 km away, the district scores higher
+                    </li>
+                  </ul>
+                  <code>Score = (Pop × 0.4) + (Coverage × 0.4) + (Buffer × 0.2)</code>
+                </div>
+              </details>
+            </div>
+          )}
         </header>
 
         <MapContainer
@@ -427,27 +749,57 @@ function App() {
                 : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
             }
           />
-          {districtData ? <InitializeMapBounds districts={districtData} stations={stations} /> : null}
+
+          {districtData ? (
+            <InitializeMapBounds districts={districtData} stations={stations} />
+          ) : null}
+
+          <MapFlyController target={flyTarget} markerRefs={markerRefs} />
+
           <Pane name="districts" style={{ zIndex: 350 }}>
-            {districtData && isDistrictMode ? (
+            {districtData && isDistrictMode && (
               <DistrictLayer districtData={districtData} isDistrictMode={isDistrictMode} />
-            ) : null}
-            {outerBorderData && isStationMode ? (
+            )}
+            {outerBorderData && isStationMode && (
               <GeoJSON
                 data={outerBorderData}
                 interactive={false}
                 style={() => scopeBoundaryStyle(isStreetBasemap)}
               />
-            ) : null}
+            )}
+            {districtData && isRecommendationMode && (
+              <RecommendationDistrictLayer
+                districtData={districtData}
+                scoredDistricts={scoredDistricts}
+              />
+            )}
           </Pane>
+
           <Pane name="stations" style={{ zIndex: 450 }}>
-            {isStationMode ? (
+            {isStationMode && (
               <StationLayer isStreetBasemap={isStreetBasemap} stations={stations} />
-            ) : (
-              <PassiveStationLayer stations={stations} />
+            )}
+            {isDistrictMode && <PassiveStationLayer stations={stations} />}
+            {isRecommendationMode && (
+              <RecommendedPinsLayer top5={top5} markerRefs={markerRefs} />
             )}
           </Pane>
         </MapContainer>
+
+        {/* ── Need score map legend (bottom-left overlay) ── */}
+        {isRecommendationMode && (
+          <div className="need-score-legend">
+            <p className="need-score-legend-title">Need score</p>
+            <ul className="need-score-legend-list">
+              {NEED_SCORE_LEGEND.map((item) => (
+                <li key={item.label}>
+                  <i className="need-score-legend-swatch" style={{ backgroundColor: item.color }} />
+                  <span>{item.label}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </section>
     </main>
   );

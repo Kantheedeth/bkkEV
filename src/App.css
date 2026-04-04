@@ -288,6 +288,279 @@
   display: none;
 }
 
+/* ── Recommendation mode tab button ─────────────────────────────────────── */
+
+.mode-button.rec-tab.active {
+  background: linear-gradient(135deg, #1d4ed8 0%, #0ea5e9 100%);
+  color: #f8fbff;
+}
+
+/* ── Recommendation side panel ───────────────────────────────────────────── */
+
+.rec-panel {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(36, 64, 77, 0.12);
+}
+
+.rec-panel-title {
+  margin: 0 0 12px;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #102a43;
+}
+
+.rec-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rec-item {
+  padding: 10px 12px;
+  border: 1px solid rgba(36, 64, 77, 0.1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+  transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.rec-item:hover,
+.rec-item:focus-visible {
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 4px 16px rgba(16, 42, 67, 0.1);
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.rec-item-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.rec-rank {
+  flex: 0 0 28px;
+  font-size: 0.78rem;
+  font-weight: 800;
+  color: #486581;
+}
+
+.rec-name {
+  flex: 1;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #102a43;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rec-score-badge {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 800;
+  color: #fff;
+}
+
+.rec-bar-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(16, 42, 67, 0.1);
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.rec-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.6s ease;
+}
+
+.rec-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.rec-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(16, 42, 67, 0.07);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #334e68;
+}
+
+/* ── "How is this calculated?" collapsible ───────────────────────────────── */
+
+.rec-formula {
+  margin-top: 12px;
+  border-top: 1px solid rgba(36, 64, 77, 0.1);
+  padding-top: 10px;
+}
+
+.rec-formula > summary {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #0a9396;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.rec-formula > summary::before {
+  content: '▶ ';
+  font-size: 0.65rem;
+}
+
+.rec-formula[open] > summary::before {
+  content: '▼ ';
+}
+
+.rec-formula-body {
+  margin-top: 10px;
+  font-size: 0.8rem;
+  color: #486581;
+  line-height: 1.55;
+}
+
+.rec-formula-body p {
+  margin: 0 0 8px;
+}
+
+.rec-formula-body ul {
+  margin: 0 0 8px;
+  padding-left: 16px;
+}
+
+.rec-formula-body li {
+  margin-bottom: 4px;
+}
+
+.rec-formula-body code {
+  display: block;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(16, 42, 67, 0.06);
+  font-size: 0.76rem;
+  color: #102a43;
+}
+
+/* ── Need score map legend (bottom-left overlay) ─────────────────────────── */
+
+.need-score-legend {
+  position: absolute;
+  bottom: 32px;
+  left: 24px;
+  z-index: 999;
+  padding: 10px 14px;
+  border: 1px solid rgba(36, 64, 77, 0.14);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 8px 24px rgba(37, 61, 78, 0.12);
+  pointer-events: none;
+}
+
+.need-score-legend-title {
+  margin: 0 0 8px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #102a43;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.need-score-legend-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.need-score-legend-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: #334e68;
+}
+
+.need-score-legend-swatch {
+  flex: 0 0 12px;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(16, 42, 67, 0.14);
+}
+
+/* ── Pulsing recommendation pin ──────────────────────────────────────────── */
+
+.pulsing-pin-wrapper {
+  background: transparent !important;
+  border: none !important;
+}
+
+.pulsing-pin {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #2563eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.5);
+  animation: pin-pulse 2s ease-out infinite;
+}
+
+.pulsing-pin::before {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  background: rgba(37, 99, 235, 0.25);
+  animation: pin-ring 2s ease-out infinite;
+}
+
+.pulsing-pin::after {
+  content: '';
+  position: absolute;
+  inset: -12px;
+  border-radius: 50%;
+  background: rgba(37, 99, 235, 0.1);
+  animation: pin-ring 2s ease-out 0.3s infinite;
+}
+
+.pulsing-pin-rank {
+  position: relative;
+  z-index: 1;
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: #fff;
+  letter-spacing: -0.02em;
+}
+
+@keyframes pin-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+
+@keyframes pin-ring {
+  0% { opacity: 0.8; transform: scale(0.8); }
+  100% { opacity: 0; transform: scale(1.8); }
+}
+
+/* ── Mobile ──────────────────────────────────────────────────────────────── */
+
 @media (max-width: 720px) {
   .map-intro {
     top: 12px;
@@ -295,5 +568,22 @@
     right: 12px;
     width: auto;
     padding: 16px;
+  }
+
+  .map-intro.rec-mode {
+    top: auto;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    width: 100%;
+    max-height: 60vh;
+    overflow-y: auto;
+    border-radius: 20px 20px 0 0;
+    border-bottom: none;
+  }
+
+  .need-score-legend {
+    left: 12px;
+    bottom: 16px;
   }
 }

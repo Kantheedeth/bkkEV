@@ -15,7 +15,6 @@ import 'leaflet/dist/leaflet.css';
 import './App.css';
 import districtInfoDataUrl from './assets/data/districtInfo.geojson?url';
 import evStationsDataUrl from './assets/data/evStations.geojson?url';
-import outerBorderDataUrl from './assets/data/outerBorder.geojson?url';
 
 const MAP_MODES = {
   DISTRICTS: 'districts',
@@ -442,6 +441,8 @@ function PassiveStationLayer({ stations }) {
 }
 
 function RecommendationDistrictLayer({ districtData, scoredDistricts }) {
+  const map = useMap();
+  const [zoom, setZoom] = useState(map.getZoom());
   const scoreMap = useMemo(() => {
     const m = new Map();
     for (const d of scoredDistricts) {
@@ -450,9 +451,13 @@ function RecommendationDistrictLayer({ districtData, scoredDistricts }) {
     return m;
   }, [scoredDistricts]);
 
+  useMapEvents({
+    zoomend: () => setZoom(map.getZoom()),
+  });
+
   return (
     <GeoJSON
-      key="rec-districts"
+      key={`rec-districts-${zoom}`}
       data={districtData}
       interactive
       style={(feature) => {
@@ -468,10 +473,20 @@ function RecommendationDistrictLayer({ districtData, scoredDistricts }) {
         const district = scoredDistricts.find((item) => item.feature.properties.fid === feature.properties.fid);
         const score = scoreMap.get(feature.properties.fid) ?? 0;
         const name = getDistrictName(feature.properties);
-        layer.bindTooltip(`${name} • ${getNeedLevel(score)} (${score}/100)`, {
-          className: 'district-label district-label-small',
-          sticky: true,
-        });
+
+        if (zoom >= DISTRICT_LABEL_MIN_ZOOM) {
+          layer.bindTooltip(name, {
+            className: getDistrictLabelClass(zoom),
+            direction: 'center',
+            permanent: true,
+          });
+        } else {
+          layer.bindTooltip(`${name} • ${getNeedLevel(score)} (${score}/100)`, {
+            className: 'district-label district-label-small',
+            sticky: true,
+          });
+        }
+
         if (district) {
           const strongestDriver = getStrongestNeedDriver(district);
           layer.bindPopup(`
@@ -546,7 +561,6 @@ function RecommendedPinsLayer({ recommendations, markerRefs }) {
 
 function App() {
   const [districtData, setDistrictData] = useState(null);
-  const [outerBorderData, setOuterBorderData] = useState(null);
   const [rawStations, setRawStations] = useState(null);
   const [loadError, setLoadError] = useState('');
   const [mapMode, setMapMode] = useState(MAP_MODES.STATIONS);
@@ -557,24 +571,21 @@ function App() {
   useEffect(() => {
     async function loadMapData() {
       try {
-        const [districtResponse, stationResponse, outerBorderResponse] = await Promise.all([
+        const [districtResponse, stationResponse] = await Promise.all([
           fetch(districtInfoDataUrl),
           fetch(evStationsDataUrl),
-          fetch(outerBorderDataUrl),
         ]);
 
-        if (!districtResponse.ok || !stationResponse.ok || !outerBorderResponse.ok) {
-          throw new Error('Failed to load district, station, or scope GeoJSON.');
+        if (!districtResponse.ok || !stationResponse.ok) {
+          throw new Error('Failed to load district or station GeoJSON.');
         }
 
-        const [districtJson, stationJson, outerBorderJson] = await Promise.all([
+        const [districtJson, stationJson] = await Promise.all([
           districtResponse.json(),
           stationResponse.json(),
-          outerBorderResponse.json(),
         ]);
 
         setDistrictData(districtJson);
-        setOuterBorderData(outerBorderJson);
         setRawStations(stationJson);
       } catch (error) {
         setLoadError(error instanceof Error ? error.message : 'Failed to load map data.');
@@ -781,9 +792,9 @@ function App() {
             {districtData && isDistrictMode && (
               <DistrictLayer districtData={districtData} isDistrictMode={isDistrictMode} />
             )}
-            {outerBorderData && isStationMode && (
+            {districtData && isStationMode && (
               <GeoJSON
-                data={outerBorderData}
+                data={districtData}
                 interactive={false}
                 style={() => scopeBoundaryStyle(isStreetBasemap)}
               />

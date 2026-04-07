@@ -121,9 +121,9 @@ function getStrongestNeedDriver(district) {
       description: 'Population pressure is the strongest reason for adding chargers here.',
     },
     {
-      score: district.coverageScore,
-      label: 'Low charger coverage',
-      description: 'This district has fewer chargers per km² than most areas in scope.',
+      score: district.serviceScore,
+      label: 'Low charger service',
+      description: 'This district has fewer chargers per 10,000 people than most areas in scope.',
     },
     {
       score: district.bufferScore,
@@ -196,38 +196,51 @@ function computeDistrictScores(districtData, stations) {
     const population = Number(props.final_population_english_Population) || 0;
     const noOfCounted = Number(props.noOfCounted) || 0;
     const centroid = computeCentroid(feature.geometry);
-    const areaKm2 = Math.max(computeAreaKm2(feature.geometry), 0.1);
+    
+    // FIX 1: The km² Trap is removed. 
+    // Now calculating "Chargers per 10,000 people" to measure actual human demand
+    const chargersPer10k = population > 0 ? (noOfCounted / population) * 10000 : 0;
+
     return {
       feature,
       name: getDistrictName(props),
       population,
       noOfCounted,
       centroid,
-      areaKm2,
-      chargersPerKm2: noOfCounted / areaKm2,
+      chargersPer10k,
     };
   });
 
   const maxPop = Math.max(...raw.map((d) => d.population));
   const minPop = Math.min(...raw.map((d) => d.population));
-  const maxDensity = Math.max(...raw.map((d) => d.chargersPerKm2));
+  // We now find the maximum Service Ratio instead of Maximum Density
+  const maxService = Math.max(...raw.map((d) => d.chargersPer10k));
 
   return raw
     .map((d) => {
+      // 1. Demand Score (0-100) -> Higher population gets higher priority score
       const popScore =
         maxPop > minPop ? ((d.population - minPop) / (maxPop - minPop)) * 100 : 50;
-      const coverageScore =
-        maxDensity > 0 ? (1 - d.chargersPerKm2 / maxDensity) * 100 : 100;
+        
+      // 2. Service Score (0-100) -> Fewer chargers per 10k gets higher priority score
+      const serviceScore =
+        maxService > 0 ? (1 - d.chargersPer10k / maxService) * 100 : 100;
+        
+      // 3. Buffer Score (0-100) -> FIX 2: Increased from 1.5km to a 5km driving radius
       const nearestDist = findNearestStationDist(d.centroid, stations);
-      const bufferScore = nearestDist >= 1.5 ? 100 : (nearestDist / 1.5) * 100;
+      const bufferScore = nearestDist >= 3 ? 100 : (nearestDist / 3) * 100;
+      
+      // FIX 3: The 30/40/30 Weights
+      // 30% Population Demand, 40% Accessibility/Buffer, 30% Service Ratio
       const needScore = Math.min(
         100,
-        Math.round(popScore * 0.4 + coverageScore * 0.4 + bufferScore * 0.2)
+        Math.round(popScore * 0.3 + serviceScore * 0.3 + bufferScore * 0.4)
       );
+      
       return {
         ...d,
         popScore: Math.round(popScore),
-        coverageScore: Math.round(coverageScore),
+        serviceScore: Math.round(serviceScore), // Renamed from coverageScore
         bufferScore: Math.round(bufferScore),
         nearestStationKm: nearestDist,
         needScore,
@@ -549,7 +562,7 @@ function RecommendedPinsLayer({ recommendations, markerRefs }) {
             <div><dt>Population</dt><dd>{d.population.toLocaleString()}</dd></div>
             <div><dt>Existing stations</dt><dd>{d.noOfCounted}</dd></div>
             <div><dt>Nearest station</dt><dd>{formatDistanceKm(d.nearestStationKm)}</dd></div>
-            <div><dt>Area</dt><dd>{d.areaKm2.toFixed(1)} km²</dd></div>
+            <div><dt>Chargers / 10k people</dt><dd>{d.chargersPer10k.toFixed(2)}</dd></div>
           </dl>
         </div>
       </Popup>
@@ -831,12 +844,12 @@ function App() {
                   indicate districts that are more likely to need additional charging stations.
                 </p>
                 <ul className="rec-info-list">
-                  <li><strong>Population (40%)</strong>: more residents increase priority.</li>
-                  <li><strong>Coverage gap (40%)</strong>: fewer chargers per km² increase priority.</li>
-                  <li><strong>Buffer zone (20%)</strong>: districts farther than 1.5 km from the nearest station rank higher.</li>
+                  <li><strong>Population (30%)</strong>: more residents increase priority.</li>
+                  <li><strong>Service gap (30%)</strong>: fewer chargers per 10,000 people increase priority.</li>
+                  <li><strong>Buffer zone (40%)</strong>: districts farther than 5 km from the nearest station rank higher.</li>
                 </ul>
                 <code className="rec-info-code">
-                  Need Score = (Population x 0.4) + (Coverage x 0.4) + (Buffer x 0.2)
+                  Need Score = (Population x 0.3) + (Service x 0.3) + (Buffer x 0.4)
                 </code>
               </div>
 
@@ -897,7 +910,7 @@ function App() {
                         </div>
                         <div className="rec-metrics">
                           <span className="rec-pill">Pop {d.popScore}</span>
-                          <span className="rec-pill">Coverage {d.coverageScore}</span>
+                          <span className="rec-pill">Service {d.serviceScore}</span>
                           <span className="rec-pill">Buffer {d.bufferScore}</span>
                           <span className="rec-pill">{formatDistanceKm(d.nearestStationKm)} away</span>
                           <span className="rec-action-hint">View on map</span>

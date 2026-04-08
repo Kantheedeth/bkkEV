@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import L from 'leaflet';
 import {
+  Circle,
   CircleMarker,
   GeoJSON,
   MapContainer,
@@ -8,6 +9,7 @@ import {
   Pane,
   Popup,
   TileLayer,
+  Tooltip,
   useMap,
   useMapEvents,
 } from 'react-leaflet';
@@ -73,6 +75,46 @@ function normalizeStations(rawData) {
       };
     })
     .filter(Boolean);
+}
+
+function pointInRing(latlng, ring) {
+  let inside = false;
+  const { lat, lng } = latlng;
+
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [lngI, latI] = ring[i];
+    const [lngJ, latJ] = ring[j];
+    const intersects =
+      latI > lat !== latJ > lat &&
+      lng < ((lngJ - lngI) * (lat - latI)) / ((latJ - latI) || Number.EPSILON) + lngI;
+
+    if (intersects) inside = !inside;
+  }
+
+  return inside;
+}
+
+function pointInGeometry(latlng, geometry) {
+  if (!geometry) return false;
+
+  if (geometry.type === 'Polygon') {
+    const [outerRing, ...holes] = geometry.coordinates;
+    if (!pointInRing(latlng, outerRing)) return false;
+    return !holes.some((ring) => pointInRing(latlng, ring));
+  }
+
+  if (geometry.type === 'MultiPolygon') {
+    return geometry.coordinates.some(([outerRing, ...holes]) => {
+      if (!pointInRing(latlng, outerRing)) return false;
+      return !holes.some((ring) => pointInRing(latlng, ring));
+    });
+  }
+
+  return false;
+}
+
+function isPointInDistrictScope(latlng, districtData) {
+  return (districtData?.features ?? []).some((feature) => pointInGeometry(latlng, feature.geometry));
 }
 
 function getDistrictName(properties) {
@@ -160,6 +202,143 @@ function findNearestStationDist(centroid, stations) {
   return min === Infinity ? 999 : min;
 }
 
+function findNearestStation(point, stations) {
+  let nearestStation = null;
+  let minDistance = Infinity;
+
+  for (const station of stations) {
+    const distance = haversineKm(point[0], point[1], station.lat, station.lng);
+    if (distance < minDistance) {
+      minDistance = distance;
+      nearestStation = station;
+    }
+  }
+
+  if (!nearestStation) {
+    return {
+      distanceKm: 999,
+      station: null,
+    };
+  }
+
+  return {
+    distanceKm: minDistance,
+    station: nearestStation,
+  };
+}
+
+function createGridCellFeature(cell) {
+  const { south, north, west, east } = cell.bounds;
+  return {
+    type: 'Feature',
+    properties: {
+      radiusKm: cell.radiusKm,
+    },
+    geometry: {
+      type: 'Polygon',
+      coordinates: [[
+        [west, south],
+        [east, south],
+        [east, north],
+        [west, north],
+        [west, south],
+      ]],
+    },
+  };
+}
+
+function findLargestUncoveredArea(feature, stations, coverageRadiusKm = 3) {
+  const bounds = L.geoJSON(feature).getBounds();
+  if (!bounds.isValid()) return null;
+
+  const south = bounds.getSouth();
+  const north = bounds.getNorth();
+  const west = bounds.getWest();
+  const east = bounds.getEast();
+  const latSpan = Math.max(0.01, north - south);
+  const lngSpan = Math.max(0.01, east - west);
+  const latStep = Math.min(0.008, Math.max(0.0025, latSpan / 12));
+  const lngStep = Math.min(0.008, Math.max(0.0025, lngSpan / 12));
+  const sampledCells = [];
+
+  for (let row = 0, lat = south + latStep / 2; lat <= north; row++, lat += latStep) {
+    for (let col = 0, lng = west + lngStep / 2; lng <= east; col++, lng += lngStep) {
+      const point = { lat, lng };
+      if (!pointInGeometry(point, feature.geometry)) continue;
+
+      const nearestStationResult = findNearestStation([lat, lng], stations);
+      sampledCells.push({
+        row,
+        col,
+        center: [lat, lng],
+        radiusKm: nearestStationResult.distanceKm,
+        nearestStation: nearestStationResult.station,
+        bounds: {
+          south: lat - latStep / 2,
+          north: lat + latStep / 2,
+          west: lng - lngStep / 2,
+          east: lng + lngStep / 2,
+        },
+      });
+    }
+  }
+
+  if (!sampledCells.length) return null;
+
+  const uncoveredCells = sampledCells.filter((cell) => cell.radiusKm >= coverageRadiusKm);
+  const targetCells = uncoveredCells.length ? uncoveredCells : sampledCells;
+  const cellMap = new Map(targetCells.map((cell) => [`${cell.row}:${cell.col}`, cell]));
+  const visited = new Set();
+  const clusters = [];
+
+  for (const cell of targetCells) {
+    const key = `${cell.row}:${cell.col}`;
+    if (visited.has(key)) continue;
+
+    const queue = [cell];
+    const clusterCells = [];
+    visited.add(key);
+
+    while (queue.length) {
+      const current = queue.shift();
+      clusterCells.push(current);
+
+      const neighbors = [
+        [current.row - 1, current.col],
+        [current.row + 1, current.col],
+        [current.row, current.col - 1],
+        [current.row, current.col + 1],
+      ];
+
+      for (const [neighborRow, neighborCol] of neighbors) {
+        const neighborKey = `${neighborRow}:${neighborCol}`;
+        if (visited.has(neighborKey)) continue;
+        const neighbor = cellMap.get(neighborKey);
+        if (!neighbor) continue;
+        visited.add(neighborKey);
+        queue.push(neighbor);
+      }
+    }
+
+    const strongestCell = [...clusterCells].sort((a, b) => b.radiusKm - a.radiusKm)[0];
+    const averageLat =
+      clusterCells.reduce((sum, clusterCell) => sum + clusterCell.center[0], 0) / clusterCells.length;
+    const averageLng =
+      clusterCells.reduce((sum, clusterCell) => sum + clusterCell.center[1], 0) / clusterCells.length;
+
+    clusters.push({
+      center: [averageLat, averageLng],
+      peakCenter: strongestCell.center,
+      radiusKm: strongestCell.radiusKm,
+      nearestStation: strongestCell.nearestStation,
+      polygons: clusterCells.map(createGridCellFeature),
+      size: clusterCells.length,
+    });
+  }
+
+  return clusters.sort((a, b) => b.size - a.size || b.radiusKm - a.radiusKm)[0] ?? null;
+}
+
 function computeCentroid(geometry) {
   let latSum = 0, lngSum = 0, count = 0;
   const processRing = (ring) => {
@@ -173,21 +352,6 @@ function computeCentroid(geometry) {
   return count > 0 ? [latSum / count, lngSum / count] : [13.75, 100.5];
 }
 
-function computeAreaKm2(geometry) {
-  const latRad = (13.75 * Math.PI) / 180;
-  const ringArea = (ring) => {
-    let a = 0;
-    for (let i = 0; i < ring.length - 1; i++) {
-      a += ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1];
-    }
-    return (Math.abs(a) / 2) * 111 * 111 * Math.cos(latRad);
-  };
-  if (geometry.type === 'Polygon') return ringArea(geometry.coordinates[0]);
-  if (geometry.type === 'MultiPolygon')
-    return geometry.coordinates.reduce((sum, poly) => sum + ringArea(poly[0]), 0);
-  return 1;
-}
-
 function computeDistrictScores(districtData, stations) {
   if (!districtData || !stations.length) return [];
 
@@ -196,6 +360,16 @@ function computeDistrictScores(districtData, stations) {
     const population = Number(props.final_population_english_Population) || 0;
     const noOfCounted = Number(props.noOfCounted) || 0;
     const centroid = computeCentroid(feature.geometry);
+    const largestUncoveredArea =
+      findLargestUncoveredArea(feature, stations) ??
+      {
+        center: centroid,
+        peakCenter: centroid,
+        radiusKm: findNearestStationDist(centroid, stations),
+        nearestStation: findNearestStation(centroid, stations).station,
+        polygons: [],
+        size: 1,
+      };
     
     // FIX 1: The km² Trap is removed. 
     // Now calculating "Chargers per 10,000 people" to measure actual human demand
@@ -207,6 +381,11 @@ function computeDistrictScores(districtData, stations) {
       population,
       noOfCounted,
       centroid,
+      gapCenter: largestUncoveredArea.center,
+      gapPeakCenter: largestUncoveredArea.peakCenter,
+      gapAreaPolygons: largestUncoveredArea.polygons,
+      gapAreaSize: largestUncoveredArea.size,
+      largestUncoveredArea,
       chargersPer10k,
     };
   });
@@ -226,8 +405,8 @@ function computeDistrictScores(districtData, stations) {
       const serviceScore =
         maxService > 0 ? (1 - d.chargersPer10k / maxService) * 100 : 100;
         
-      // 3. Buffer Score (0-100) -> FIX 2: Increased from 1.5km to a 5km driving radius
-      const nearestDist = findNearestStationDist(d.centroid, stations);
+      // 3. Buffer Score (0-100) based on the strongest uncovered area in the district
+      const nearestDist = d.largestUncoveredArea.radiusKm;
       const bufferScore = nearestDist >= 3 ? 100 : (nearestDist / 3) * 100;
       
       // FIX 3: The 30/40/30 Weights
@@ -243,6 +422,8 @@ function computeDistrictScores(districtData, stations) {
         serviceScore: Math.round(serviceScore), // Renamed from coverageScore
         bufferScore: Math.round(bufferScore),
         nearestStationKm: nearestDist,
+        gapRadiusKm: nearestDist,
+        nearestStation: d.largestUncoveredArea.nearestStation,
         needScore,
       };
     })
@@ -287,7 +468,11 @@ function MapFlyController({ target, markerRefs }) {
 
   useEffect(() => {
     if (!target) return;
-    map.flyTo(target.latlng, target.zoom ?? 13, { duration: 1.0 });
+    if (target.bounds) {
+      map.flyToBounds(target.bounds, { duration: 1.0, padding: [36, 36] });
+    } else {
+      map.flyTo(target.latlng, target.zoom ?? 13, { duration: 1.0 });
+    }
 
     if (target.popupIndex !== undefined) {
       const onMoveEnd = () => {
@@ -299,6 +484,18 @@ function MapFlyController({ target, markerRefs }) {
       return () => map.off('moveend', onMoveEnd);
     }
   }, [map, target, markerRefs]);
+
+  return null;
+}
+
+function RecommendationResetController({ districtData, isEnabled, onReset }) {
+  useMapEvents({
+    click: (event) => {
+      if (!isEnabled || !districtData) return;
+      if (isPointInDistrictScope(event.latlng, districtData)) return;
+      onReset();
+    },
+  });
 
   return null;
 }
@@ -453,7 +650,128 @@ function PassiveStationLayer({ stations }) {
   ));
 }
 
-function RecommendationDistrictLayer({ districtData, scoredDistricts }) {
+function getRecommendationBounds(feature) {
+  const bounds = L.geoJSON(feature).getBounds();
+  return bounds.isValid() ? bounds : null;
+}
+
+function RecommendationGapLayer({ selectedDistrict }) {
+  if (!selectedDistrict) return null;
+  const districtId = selectedDistrict.feature?.properties?.fid ?? selectedDistrict.name;
+
+  return (
+    <>
+      <GeoJSON
+        key={`selected-district-boundary-${districtId}`}
+        data={selectedDistrict.feature}
+        interactive={false}
+        style={{
+          color: '#7c2d12',
+          weight: 3,
+          fillColor: '#fb923c',
+          fillOpacity: 0.15,
+          dashArray: '10 6',
+        }}
+      />
+      {selectedDistrict.gapAreaPolygons?.length ? (
+        <GeoJSON
+          key={`selected-district-gap-polygons-${districtId}`}
+          data={{
+            type: 'FeatureCollection',
+            features: selectedDistrict.gapAreaPolygons,
+          }}
+          interactive={false}
+          style={() => ({
+            color: '#ea580c',
+            weight: 1.4,
+            fillColor: '#fb923c',
+            fillOpacity: 0.28,
+          })}
+        />
+      ) : (
+        <Circle
+          key={`selected-district-gap-circle-${districtId}`}
+          center={selectedDistrict.gapCenter}
+          radius={selectedDistrict.gapRadiusKm * 1000}
+          pathOptions={{
+            color: '#f97316',
+            weight: 3,
+            fillColor: '#fdba74',
+            fillOpacity: 0.16,
+          }}
+        />
+      )}
+      <CircleMarker
+        key={`selected-district-gap-marker-${districtId}`}
+        center={selectedDistrict.gapCenter}
+        radius={10}
+        bubblingMouseEvents={false}
+        pathOptions={{
+          color: '#7c2d12',
+          weight: 3,
+          fillColor: '#fb923c',
+          fillOpacity: 1,
+        }}
+      >
+        <Tooltip direction="top" offset={[0, -8]} opacity={1}>
+          <div className="rec-mini-popup">
+            <strong>{selectedDistrict.name}</strong>
+            <span>Largest uncovered area: {formatDistanceKm(selectedDistrict.gapRadiusKm)}</span>
+          </div>
+        </Tooltip>
+      </CircleMarker>
+    </>
+  );
+}
+
+function SelectedDistrictStationsLayer({ selectedDistrict, stations, isStreetBasemap }) {
+  if (!selectedDistrict) return null;
+
+  const districtStations = stations.filter((station) =>
+    pointInGeometry({ lat: station.lat, lng: station.lng }, selectedDistrict.feature.geometry)
+  );
+
+  return districtStations.map((station) => (
+    <CircleMarker
+      key={`selected-district-station-${station.id}`}
+      center={[station.lat, station.lng]}
+      bubblingMouseEvents
+      interactive
+      pathOptions={{
+        color: isStreetBasemap ? '#ffffff' : '#0f172a',
+        fillColor: '#2563eb',
+        fillOpacity: 0.95,
+        opacity: 1,
+        weight: isStreetBasemap ? 1.2 : 2,
+      }}
+      radius={isStreetBasemap ? 5 : 6}
+    >
+      <Popup>
+        <div className="station-popup">
+          <h3>{station.name}</h3>
+          <p>{station.address}</p>
+          <dl>
+            <div>
+              <dt>Rating</dt>
+              <dd>{station.rating ?? 'N/A'}</dd>
+            </div>
+            <div>
+              <dt>Reviews</dt>
+              <dd>{formatInteger(station.reviews)}</dd>
+            </div>
+          </dl>
+        </div>
+      </Popup>
+    </CircleMarker>
+  ));
+}
+
+function RecommendationDistrictLayer({
+  districtData,
+  onSelectDistrict,
+  scoredDistricts,
+  selectedDistrictId,
+}) {
   const map = useMap();
   const [zoom, setZoom] = useState(map.getZoom());
   const scoreMap = useMemo(() => {
@@ -476,10 +794,10 @@ function RecommendationDistrictLayer({ districtData, scoredDistricts }) {
       style={(feature) => {
         const score = scoreMap.get(feature.properties.fid) ?? 0;
         return {
-          color: '#1f3c48',
-          weight: 1.2,
+          color: feature.properties.fid === selectedDistrictId ? '#7c2d12' : '#1f3c48',
+          weight: feature.properties.fid === selectedDistrictId ? 2.8 : 1.2,
           fillColor: getNeedScoreColor(score),
-          fillOpacity: 0.6,
+          fillOpacity: feature.properties.fid === selectedDistrictId ? 0.78 : 0.6,
         };
       }}
       onEachFeature={(feature, layer) => {
@@ -491,29 +809,13 @@ function RecommendationDistrictLayer({ districtData, scoredDistricts }) {
           layer.bindTooltip(name, {
             className: getDistrictLabelClass(zoom),
             direction: 'center',
-            permanent: true,
+            sticky: true,
           });
         } else {
-          layer.bindTooltip(`${name} • ${getNeedLevel(score)} (${score}/100)`, {
+          layer.bindTooltip(name, {
             className: 'district-label district-label-small',
             sticky: true,
           });
-        }
-
-        if (district) {
-          const strongestDriver = getStrongestNeedDriver(district);
-          layer.bindPopup(`
-            <div class="district-popup">
-              <h3>${name}</h3>
-              <p>${getNeedLevel(score)} for additional charging stations</p>
-              <dl>
-                <div><dt>Need score</dt><dd>${district.needScore}/100</dd></div>
-                <div><dt>Main reason</dt><dd>${strongestDriver.label}</dd></div>
-                <div><dt>Nearest station</dt><dd>${formatDistanceKm(district.nearestStationKm)}</dd></div>
-                <div><dt>Existing stations</dt><dd>${formatInteger(district.noOfCounted)}</dd></div>
-              </dl>
-            </div>
-          `);
         }
         layer.on({
           mouseover: () => {
@@ -523,11 +825,14 @@ function RecommendationDistrictLayer({ districtData, scoredDistricts }) {
           mouseout: () => {
             const s = scoreMap.get(feature.properties.fid) ?? 0;
             layer.setStyle({
-              color: '#1f3c48',
-              weight: 1.2,
+              color: feature.properties.fid === selectedDistrictId ? '#7c2d12' : '#1f3c48',
+              weight: feature.properties.fid === selectedDistrictId ? 2.8 : 1.2,
               fillColor: getNeedScoreColor(s),
-              fillOpacity: 0.6,
+              fillOpacity: feature.properties.fid === selectedDistrictId ? 0.78 : 0.6,
             });
+          },
+          click: () => {
+            if (district) onSelectDistrict(district);
           },
         });
       }}
@@ -548,26 +853,83 @@ function RecommendedPinsLayer({ recommendations, markerRefs }) {
       icon={icons[i]}
       ref={(el) => { markerRefs.current[i] = el; }}
     >
-      <Popup offset={[0, -56]}>
-        <div className="station-popup">
-          <h3>Recommended #{i + 1}</h3>
-          <p>
-            {d.name}
-            <br />
-            {getNeedLevel(d.needScore)}
-          </p>
-          <dl>
-            <div><dt>Need score</dt><dd>{d.needScore}/100</dd></div>
-            <div><dt>Main reason</dt><dd>{getStrongestNeedDriver(d).label}</dd></div>
-            <div><dt>Population</dt><dd>{d.population.toLocaleString()}</dd></div>
-            <div><dt>Existing stations</dt><dd>{d.noOfCounted}</dd></div>
-            <div><dt>Nearest station</dt><dd>{formatDistanceKm(d.nearestStationKm)}</dd></div>
-            <div><dt>Chargers / 10k people</dt><dd>{d.chargersPer10k.toFixed(2)}</dd></div>
-          </dl>
+      <Tooltip direction="top" offset={[0, -18]} opacity={1}>
+        <div className="rec-mini-popup">
+          <strong>{d.name}</strong>
+          <span>Gap: {formatDistanceKm(d.nearestStationKm)}</span>
         </div>
-      </Popup>
+      </Tooltip>
     </Marker>
   ));
+}
+
+function RecommendationDetailCard({ district }) {
+  const strongestDriver = getStrongestNeedDriver(district);
+
+  return (
+    <aside className="rec-side-card rec-list-overlay" aria-label="Selected district details">
+      <h3 className="rec-side-title">Selected district</h3>
+      <div className="rec-detail-card">
+        <div className="rec-detail-header">
+          <div className="rec-title-block">
+            <span className="rec-name">{district.name}</span>
+            <span className="rec-subtitle">{getNeedLevel(district.needScore)} • {strongestDriver.label}</span>
+          </div>
+          <span
+            className="rec-score-badge"
+            style={{ backgroundColor: getNeedScoreColor(district.needScore) }}
+          >
+            {district.needScore}/100
+          </span>
+        </div>
+
+        <div className="rec-bar-track">
+          <div
+            className="rec-bar-fill"
+            style={{
+              width: `${district.needScore}%`,
+              backgroundColor: getNeedScoreColor(district.needScore),
+            }}
+          />
+        </div>
+
+        <dl className="rec-detail-list">
+          <div>
+            <dt>Largest uncovered area</dt>
+            <dd>{formatDistanceKm(district.nearestStationKm)}</dd>
+          </div>
+          <div>
+            <dt>Uncovered cells</dt>
+            <dd>{district.gapAreaSize ?? 'N/A'}</dd>
+          </div>
+          <div>
+            <dt>Nearest station</dt>
+            <dd>{district.nearestStation?.name ?? 'N/A'}</dd>
+          </div>
+          <div>
+            <dt>Population</dt>
+            <dd>{formatInteger(district.population)}</dd>
+          </div>
+          <div>
+            <dt>Existing stations</dt>
+            <dd>{formatInteger(district.noOfCounted)}</dd>
+          </div>
+          <div>
+            <dt>Chargers / 10k</dt>
+            <dd>{district.chargersPer10k.toFixed(2)}</dd>
+          </div>
+        </dl>
+
+        <div className="rec-metrics rec-detail-metrics">
+          <span className="rec-pill">Pop {district.popScore}</span>
+          <span className="rec-pill">Service {district.serviceScore}</span>
+          <span className="rec-pill">Buffer {district.bufferScore}</span>
+        </div>
+
+        <p className="rec-detail-hint">Click outside the study area to clear this district and return to the full list.</p>
+      </div>
+    </aside>
+  );
 }
 
 // ─── App ──────────────────────────────────────────────────────────────────────
@@ -578,6 +940,7 @@ function App() {
   const [loadError, setLoadError] = useState('');
   const [mapMode, setMapMode] = useState(MAP_MODES.STATIONS);
   const [basemap, setBasemap] = useState(BASEMAPS.STREET);
+  const [selectedRecommendation, setSelectedRecommendation] = useState(null);
   const [flyTarget, setFlyTarget] = useState(null);
   const markerRefs = useRef([]);
 
@@ -626,8 +989,27 @@ function App() {
   const isRecommendationMode = mapMode === MAP_MODES.RECOMMENDATION;
   const isStreetBasemap = basemap === BASEMAPS.STREET;
 
-  function handleListItemClick(d, i) {
-    setFlyTarget({ latlng: d.centroid, zoom: 13, popupIndex: i, _ts: Date.now() });
+  function handleRecommendationSelect(district) {
+    const bounds = getRecommendationBounds(district.feature);
+    setSelectedRecommendation(district);
+    setFlyTarget({
+      bounds,
+      latlng: district.centroid,
+      _ts: Date.now(),
+    });
+  }
+
+  function handleRecommendationReset() {
+    if (!districtData) return;
+    setSelectedRecommendation(null);
+    setFlyTarget({
+      bounds: L.geoJSON(districtData).getBounds().pad(0.06),
+      _ts: Date.now(),
+    });
+  }
+
+  function handleListItemClick(d) {
+    handleRecommendationSelect(d);
   }
 
   return (
@@ -752,6 +1134,9 @@ function App() {
                 The map shows need across all districts. The right-side cards focus only on
                 critical districts.
               </p>
+              <p className="rec-panel-intro">
+                Click a district on the map or in the list to inspect its charger gap.
+              </p>
 
               {scoredDistricts.length === 0 ? (
                 <p className="status-message">Calculating scores…</p>
@@ -800,6 +1185,11 @@ function App() {
           ) : null}
 
           <MapFlyController target={flyTarget} markerRefs={markerRefs} />
+          <RecommendationResetController
+            districtData={districtData}
+            isEnabled={isRecommendationMode}
+            onReset={handleRecommendationReset}
+          />
 
           <Pane name="districts" style={{ zIndex: 350 }}>
             {districtData && isDistrictMode && (
@@ -815,7 +1205,9 @@ function App() {
             {districtData && isRecommendationMode && (
               <RecommendationDistrictLayer
                 districtData={districtData}
+                onSelectDistrict={handleRecommendationSelect}
                 scoredDistricts={scoredDistricts}
+                selectedDistrictId={selectedRecommendation?.feature.properties.fid}
               />
             )}
           </Pane>
@@ -826,10 +1218,24 @@ function App() {
             )}
             {isDistrictMode && <PassiveStationLayer stations={stations} />}
             {isRecommendationMode && (
-              <RecommendedPinsLayer
-                recommendations={criticalRecommendations}
-                markerRefs={markerRefs}
-              />
+              selectedRecommendation ? (
+                <SelectedDistrictStationsLayer
+                  isStreetBasemap={isStreetBasemap}
+                  selectedDistrict={selectedRecommendation}
+                  stations={stations}
+                />
+              ) : (
+                <RecommendedPinsLayer
+                  recommendations={criticalRecommendations}
+                  markerRefs={markerRefs}
+                />
+              )
+            )}
+          </Pane>
+
+          <Pane name="recommendation-gap" style={{ zIndex: 470 }}>
+            {isRecommendationMode && selectedRecommendation && (
+              <RecommendationGapLayer selectedDistrict={selectedRecommendation} />
             )}
           </Pane>
         </MapContainer>
@@ -866,62 +1272,66 @@ function App() {
               </div>
             </aside>
 
-            <aside className="rec-side-card rec-list-overlay" aria-label="Critical district list">
-              <h3 className="rec-side-title">Critical districts</h3>
-              {criticalRecommendations.length === 0 ? (
-                <p className="rec-side-empty">No districts are currently in the critical range.</p>
-              ) : (
-                <div className="rec-list-scroll">
-                  <ol className="rec-list">
-                  {criticalRecommendations.map((d, i) => {
-                    const strongestDriver = getStrongestNeedDriver(d);
-                    return (
-                      <li
-                        key={d.feature.properties.fid}
-                        className="rec-item"
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => handleListItemClick(d, i)}
-                        onKeyDown={(e) => e.key === 'Enter' && handleListItemClick(d, i)}
-                      >
-                        <div className="rec-item-header">
-                          <span className="rec-rank">#{i + 1}</span>
-                          <div className="rec-title-block">
-                            <span className="rec-name">{d.name}</span>
-                            <span className="rec-subtitle">
-                              {getNeedLevel(d.needScore)} • {strongestDriver.label}
+            {selectedRecommendation ? (
+              <RecommendationDetailCard district={selectedRecommendation} />
+            ) : (
+              <aside className="rec-side-card rec-list-overlay" aria-label="Critical district list">
+                <h3 className="rec-side-title">Critical districts</h3>
+                {criticalRecommendations.length === 0 ? (
+                  <p className="rec-side-empty">No districts are currently in the critical range.</p>
+                ) : (
+                  <div className="rec-list-scroll">
+                    <ol className="rec-list">
+                    {criticalRecommendations.map((d, i) => {
+                      const strongestDriver = getStrongestNeedDriver(d);
+                      return (
+                        <li
+                          key={d.feature.properties.fid}
+                          className="rec-item"
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => handleListItemClick(d)}
+                          onKeyDown={(e) => e.key === 'Enter' && handleListItemClick(d)}
+                        >
+                          <div className="rec-item-header">
+                            <span className="rec-rank">#{i + 1}</span>
+                            <div className="rec-title-block">
+                              <span className="rec-name">{d.name}</span>
+                              <span className="rec-subtitle">
+                                {getNeedLevel(d.needScore)} • {strongestDriver.label}
+                              </span>
+                            </div>
+                            <span
+                              className="rec-score-badge"
+                              style={{ backgroundColor: getNeedScoreColor(d.needScore) }}
+                            >
+                              {d.needScore}/100
                             </span>
                           </div>
-                          <span
-                            className="rec-score-badge"
-                            style={{ backgroundColor: getNeedScoreColor(d.needScore) }}
-                          >
-                            {d.needScore}/100
-                          </span>
-                        </div>
-                        <div className="rec-bar-track">
-                          <div
-                            className="rec-bar-fill"
-                            style={{
-                              width: `${d.needScore}%`,
-                              backgroundColor: getNeedScoreColor(d.needScore),
-                            }}
-                          />
-                        </div>
-                        <div className="rec-metrics">
-                          <span className="rec-pill">Pop {d.popScore}</span>
-                          <span className="rec-pill">Service {d.serviceScore}</span>
-                          <span className="rec-pill">Buffer {d.bufferScore}</span>
-                          <span className="rec-pill">{formatDistanceKm(d.nearestStationKm)} away</span>
-                          <span className="rec-action-hint">View on map</span>
-                        </div>
-                      </li>
-                    );
-                  })}
-                  </ol>
-                </div>
-              )}
-            </aside>
+                          <div className="rec-bar-track">
+                            <div
+                              className="rec-bar-fill"
+                              style={{
+                                width: `${d.needScore}%`,
+                                backgroundColor: getNeedScoreColor(d.needScore),
+                              }}
+                            />
+                          </div>
+                          <div className="rec-metrics">
+                            <span className="rec-pill">Pop {d.popScore}</span>
+                            <span className="rec-pill">Service {d.serviceScore}</span>
+                            <span className="rec-pill">Buffer {d.bufferScore}</span>
+                            <span className="rec-pill">{formatDistanceKm(d.nearestStationKm)} away</span>
+                            <span className="rec-action-hint">View on map</span>
+                          </div>
+                        </li>
+                      );
+                    })}
+                    </ol>
+                  </div>
+                )}
+              </aside>
+            )}
           </div>
         )}
 

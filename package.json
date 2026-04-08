@@ -15,7 +15,8 @@
     "leaflet.heat": "^0.2.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "react-leaflet": "^5.0.0"
+    "react-leaflet": "^5.0.0",
+    "turf": "^3.0.14"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

@@ -531,6 +531,20 @@
   width: min(270px, calc(100vw - 36px));
   display: grid;
   gap: 8px;
+  max-height: calc(100vh - 36px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  align-content: start;
+  padding-right: 4px;
+}
+
+.rec-overlay-stack::-webkit-scrollbar {
+  width: 8px;
+}
+
+.rec-overlay-stack::-webkit-scrollbar-thumb {
+  background: rgba(16, 42, 67, 0.16);
+  border-radius: 999px;
 }
 
 .rec-info-overlay {
@@ -733,6 +747,92 @@
   margin-left: 0;
 }
 
+.planner-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.planner-summary-tile {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid rgba(36, 64, 77, 0.1);
+  border-radius: 10px;
+  background: rgba(16, 42, 67, 0.04);
+}
+
+.planner-summary-label {
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #486581;
+}
+
+.planner-summary-tile strong {
+  font-size: 0.94rem;
+  color: #102a43;
+}
+
+.planner-summary-tile span:last-child {
+  font-size: 0.66rem;
+  color: #486581;
+}
+
+.planner-eval-card {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(36, 64, 77, 0.1);
+}
+
+.planner-eval-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.planner-verdict-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  color: #ffffff;
+}
+
+.planner-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.planner-button {
+  flex: 1;
+  border: 0;
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(16, 42, 67, 0.08);
+  color: #102a43;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.planner-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.planner-button-strong {
+  background: #102a43;
+  color: #f8fbff;
+}
+
 /* ── Pulsing recommendation pin ──────────────────────────────────────────── */
 
 .pulsing-pin-wrapper {
@@ -818,6 +918,8 @@
     top: 12px;
     right: 12px;
     width: min(236px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    padding-right: 2px;
   }
 
   .rec-info-overlay,
@@ -827,5 +929,11 @@
 
   .rec-summary-strip {
     grid-template-columns: 1fr;
+  }
+
+  .planner-summary-grid,
+  .planner-actions {
+    grid-template-columns: 1fr;
+    flex-direction: column;
   }
 }

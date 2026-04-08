@@ -46,6 +46,9 @@ const NEED_SCORE_LEGEND = [
   { color: '#eab308', label: 'Moderate (40–59)' },
   { color: '#22c55e', label: 'Well covered (0–39)' },
 ];
+const BUFFER_RADIUS_KM = 3;
+const PLANNER_MIN_SPACING_KM = 0.5;
+const COVERAGE_SAMPLE_GRID = 5;
 
 // ─── Formatters ──────────────────────────────────────────────────────────────
 
@@ -212,6 +215,31 @@ function findNearestStationDist(centroid, stations) {
   return min === Infinity ? 999 : min;
 }
 
+function geometryBounds(geometry) {
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+
+  const visit = (coords) => {
+    if (!Array.isArray(coords)) return;
+    if (typeof coords[0] === 'number' && typeof coords[1] === 'number') {
+      const [lng, lat] = coords;
+      minLat = Math.min(minLat, lat);
+      maxLat = Math.max(maxLat, lat);
+      minLng = Math.min(minLng, lng);
+      maxLng = Math.max(maxLng, lng);
+      return;
+    }
+    coords.forEach(visit);
+  };
+
+  visit(geometry?.coordinates);
+
+  if (![minLat, maxLat, minLng, maxLng].every(Number.isFinite)) return null;
+  return { minLat, maxLat, minLng, maxLng };
+}
+
 function findNearestStation(point, stations) {
   let nearestStation = null;
   let minDistance = Infinity;
@@ -317,7 +345,10 @@ function computeDistrictScores(districtData, stations, roadPoints) {
   const raw = districtData.features.map((feature) => {
     const props = feature.properties;
     const population = Number(props.final_population_english_Population) || 0;
-    const noOfCounted = Number(props.noOfCounted) || 0;
+    const stationsInDistrict = stations.filter((station) =>
+      pointInGeometry({ lat: station.lat, lng: station.lng }, feature.geometry)
+    );
+    const noOfCounted = stationsInDistrict.length;
     const centroid = computeCentroid(feature.geometry);
     const nearestStationResult = findNearestStation(centroid, stations);
     const nearestRoadKm = findNearestRoadDist(centroid, roadPoints);
@@ -389,6 +420,124 @@ function computeDistrictScores(districtData, stations, roadPoints) {
     .sort((a, b) => b.needScore - a.needScore);
 }
 
+function buildCoverageSamplePoints(districtData) {
+  if (!districtData) return [];
+
+  return districtData.features.flatMap((feature) => {
+    const bounds = geometryBounds(feature.geometry);
+    if (!bounds) return [];
+
+    const latSpan = bounds.maxLat - bounds.minLat;
+    const lngSpan = bounds.maxLng - bounds.minLng;
+    const latStep = latSpan / COVERAGE_SAMPLE_GRID;
+    const lngStep = lngSpan / COVERAGE_SAMPLE_GRID;
+    const districtId = feature.properties?.fid;
+    const samples = [];
+
+    for (let row = 0; row < COVERAGE_SAMPLE_GRID; row += 1) {
+      for (let col = 0; col < COVERAGE_SAMPLE_GRID; col += 1) {
+        const lat = bounds.minLat + (row + 0.5) * (latStep || 0.01);
+        const lng = bounds.minLng + (col + 0.5) * (lngStep || 0.01);
+        const point = { lat, lng };
+        if (pointInGeometry(point, feature.geometry)) {
+          samples.push({ ...point, districtId });
+        }
+      }
+    }
+
+    if (samples.length > 0) return samples;
+
+    const centroid = computeCentroid(feature.geometry);
+    return [{ lat: centroid[0], lng: centroid[1], districtId }];
+  });
+}
+
+function computeCoveragePercent(samplePoints, stations) {
+  if (!samplePoints.length) return 0;
+
+  let coveredCount = 0;
+  for (const point of samplePoints) {
+    const isCovered = stations.some(
+      (station) => haversineKm(point.lat, point.lng, station.lat, station.lng) <= BUFFER_RADIUS_KM
+    );
+    if (isCovered) coveredCount += 1;
+  }
+
+  return (coveredCount / samplePoints.length) * 100;
+}
+
+function getPlannerVerdictColor(verdict) {
+  if (verdict === 'Suitable') return '#16a34a';
+  if (verdict === 'Maybe') return '#f59e0b';
+  return '#dc2626';
+}
+
+function evaluatePlannerPlacement({
+  district,
+  latlng,
+  existingStations,
+  plannedStations,
+  coverageSamples,
+}) {
+  const point = [latlng.lat, latlng.lng];
+  const existingNearest = findNearestStation(point, existingStations);
+  const networkBefore = [...existingStations, ...plannedStations];
+  const nearestNetwork = findNearestStation(point, networkBefore);
+  const districtSamples = coverageSamples.filter(
+    (sample) => sample.districtId === district.feature.properties.fid
+  );
+  const coverageBefore = computeCoveragePercent(coverageSamples, networkBefore);
+  const districtCoverageBefore = computeCoveragePercent(districtSamples, networkBefore);
+  const candidateStation = {
+    id: `planned-${Date.now()}-${Math.round(latlng.lat * 10000)}-${Math.round(latlng.lng * 10000)}`,
+    lat: latlng.lat,
+    lng: latlng.lng,
+    name: `Planned charger ${plannedStations.length + 1}`,
+    address: district.name,
+  };
+  const networkAfter = [...networkBefore, candidateStation];
+  const coverageAfter = computeCoveragePercent(coverageSamples, networkAfter);
+  const districtCoverageAfter = computeCoveragePercent(districtSamples, networkAfter);
+  const coverageGain = coverageAfter - coverageBefore;
+  const districtCoverageGain = districtCoverageAfter - districtCoverageBefore;
+  const spacingScore = Math.min(nearestNetwork.distanceKm / BUFFER_RADIUS_KM, 1) * 45;
+  const districtGainScore = Math.min(districtCoverageGain / 10, 1) * 35;
+  const needScoreBoost = (district.needScore / 100) * 20;
+  const suitabilityScore = Math.round(spacingScore + districtGainScore + needScoreBoost);
+
+  let verdict = 'Not suitable';
+  let reason = 'This point adds limited new coverage compared with the current network.';
+
+  if (nearestNetwork.distanceKm < PLANNER_MIN_SPACING_KM) {
+    verdict = 'Not suitable';
+    reason = 'Too close to an existing or already planned charger.';
+  } else if (districtCoverageGain >= 6 || coverageGain >= 0.8 || nearestNetwork.distanceKm >= 2) {
+    verdict = 'Suitable';
+    reason = 'Strong spacing and clear coverage gain for the selected district.';
+  } else if (districtCoverageGain >= 2 || coverageGain >= 0.2) {
+    verdict = 'Maybe';
+    reason = 'The point helps, but the gain is moderate rather than decisive.';
+  }
+
+  return {
+    ...candidateStation,
+    verdict,
+    reason,
+    suitabilityScore,
+    coverageBefore,
+    coverageAfter,
+    coverageGain,
+    districtCoverageBefore,
+    districtCoverageAfter,
+    districtCoverageGain,
+    nearestExistingKm: existingNearest.distanceKm,
+    nearestExistingName: existingNearest.station?.name ?? 'N/A',
+    nearestNetworkKm: nearestNetwork.distanceKm,
+    districtId: district.feature.properties.fid,
+    districtName: district.name,
+  };
+}
+
 function createPulsingIcon(rank) {
   return L.divIcon({
     className: 'pulsing-pin-wrapper',
@@ -454,6 +603,34 @@ function RecommendationResetController({ districtData, isEnabled, onReset }) {
       if (!isEnabled || !districtData) return;
       if (isPointInDistrictScope(event.latlng, districtData)) return;
       onReset();
+    },
+  });
+
+  return null;
+}
+
+function PlannerClickController({
+  coverageSamples,
+  existingStations,
+  isEnabled,
+  onPlaceCandidate,
+  plannedStations,
+  selectedDistrict,
+}) {
+  useMapEvents({
+    click: (event) => {
+      if (!isEnabled || !selectedDistrict) return;
+      if (!pointInGeometry(event.latlng, selectedDistrict.feature.geometry)) return;
+
+      const plannedStation = evaluatePlannerPlacement({
+        district: selectedDistrict,
+        latlng: event.latlng,
+        existingStations,
+        plannedStations,
+        coverageSamples,
+      });
+
+      onPlaceCandidate(plannedStation);
     },
   });
 
@@ -754,6 +931,67 @@ function RecommendedPinsLayer({ recommendations, markerRefs }) {
   ));
 }
 
+function PlannedStationsLayer({ plannedStations }) {
+  return plannedStations.flatMap((station, index) => {
+    const color = getPlannerVerdictColor(station.verdict);
+
+    return [
+      <Circle
+        key={`planned-ring-${station.id}`}
+        center={[station.lat, station.lng]}
+        radius={BUFFER_RADIUS_KM * 1000}
+        pathOptions={{
+          color,
+          weight: 1.2,
+          fillColor: color,
+          fillOpacity: 0.08,
+          opacity: 0.65,
+          dashArray: '6 6',
+        }}
+      />,
+      <CircleMarker
+        key={`planned-marker-${station.id}`}
+        center={[station.lat, station.lng]}
+        radius={8}
+        bubblingMouseEvents
+        interactive
+        pathOptions={{
+          color: '#ffffff',
+          fillColor: color,
+          fillOpacity: 0.96,
+          opacity: 1,
+          weight: 2,
+        }}
+      >
+        <Popup>
+          <div className="station-popup">
+            <h3>Planned charger #{index + 1}</h3>
+            <p>{station.districtName}</p>
+            <dl>
+              <div>
+                <dt>Verdict</dt>
+                <dd>{station.verdict}</dd>
+              </div>
+              <div>
+                <dt>Suitability</dt>
+                <dd>{station.suitabilityScore}/100</dd>
+              </div>
+              <div>
+                <dt>Coverage gain</dt>
+                <dd>{station.coverageGain.toFixed(2)} pts</dd>
+              </div>
+              <div>
+                <dt>Nearest charger</dt>
+                <dd>{formatDistanceKm(station.nearestNetworkKm)}</dd>
+              </div>
+            </dl>
+          </div>
+        </Popup>
+      </CircleMarker>,
+    ];
+  });
+}
+
 function RecommendationDetailCard({ district }) {
   const strongestDriver = getStrongestNeedDriver(district);
 
@@ -798,7 +1036,7 @@ function RecommendationDetailCard({ district }) {
             <dd>{formatInteger(district.population)}</dd>
           </div>
           <div>
-            <dt>Existing stations</dt>
+            <dt>Stations in network</dt>
             <dd>{formatInteger(district.noOfCounted)}</dd>
           </div>
           <div>
@@ -824,6 +1062,96 @@ function RecommendationDetailCard({ district }) {
   );
 }
 
+function PlannerControlCard({
+  district,
+  networkCoverageAfter,
+  networkCoverageBefore,
+  onClearPlanner,
+  onRemoveLastPlanned,
+  plannedCount,
+  plannedStations,
+}) {
+  const selectedDistrictPlans = plannedStations.filter(
+    (station) => station.districtId === district.feature.properties.fid
+  );
+  const latestPlan = selectedDistrictPlans[selectedDistrictPlans.length - 1] ?? null;
+
+  return (
+    <aside className="rec-side-card rec-list-overlay" aria-label="Build your own network planner">
+      <h3 className="rec-side-title">Build Your Own Network</h3>
+      <div className="rec-detail-card">
+        <p className="rec-info-text">
+          Click anywhere inside <strong>{district.name}</strong> to place a planned charger. The app
+          scores the point instantly and recalculates study-area coverage.
+        </p>
+
+        <div className="planner-summary-grid">
+          <div className="planner-summary-tile">
+            <span className="planner-summary-label">Current coverage</span>
+            <strong>{networkCoverageAfter.toFixed(1)}%</strong>
+            <span>
+              {networkCoverageAfter >= networkCoverageBefore
+                ? `+${(networkCoverageAfter - networkCoverageBefore).toFixed(1)} pts vs base`
+                : 'No improvement yet'}
+            </span>
+          </div>
+          <div className="planner-summary-tile">
+            <span className="planner-summary-label">Planned chargers</span>
+            <strong>{plannedCount}</strong>
+            <span>{selectedDistrictPlans.length} in this district</span>
+          </div>
+        </div>
+
+        {latestPlan ? (
+          <div className="planner-eval-card">
+            <div className="planner-eval-header">
+              <span
+                className="planner-verdict-badge"
+                style={{ backgroundColor: getPlannerVerdictColor(latestPlan.verdict) }}
+              >
+                {latestPlan.verdict}
+              </span>
+              <strong>{latestPlan.suitabilityScore}/100</strong>
+            </div>
+            <p className="rec-info-text">{latestPlan.reason}</p>
+            <dl className="rec-detail-list">
+              <div>
+                <dt>Coverage gain</dt>
+                <dd>{latestPlan.coverageGain.toFixed(2)} pts</dd>
+              </div>
+              <div>
+                <dt>District gain</dt>
+                <dd>{latestPlan.districtCoverageGain.toFixed(2)} pts</dd>
+              </div>
+              <div>
+                <dt>Nearest charger</dt>
+                <dd>{formatDistanceKm(latestPlan.nearestNetworkKm)}</dd>
+              </div>
+              <div>
+                <dt>Closest existing</dt>
+                <dd>{formatDistanceKm(latestPlan.nearestExistingKm)}</dd>
+              </div>
+            </dl>
+          </div>
+        ) : (
+          <p className="rec-side-empty">
+            No planner point placed yet. Click inside the selected district to test a candidate site.
+          </p>
+        )}
+
+        <div className="planner-actions">
+          <button type="button" className="planner-button" onClick={onRemoveLastPlanned} disabled={!plannedCount}>
+            Remove last pin
+          </button>
+          <button type="button" className="planner-button planner-button-strong" onClick={onClearPlanner} disabled={!plannedCount}>
+            Clear planner
+          </button>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 function App() {
@@ -833,8 +1161,9 @@ function App() {
   const [loadError, setLoadError] = useState('');
   const [mapMode, setMapMode] = useState(MAP_MODES.STATIONS);
   const [basemap, setBasemap] = useState(BASEMAPS.STREET);
-  const [selectedRecommendation, setSelectedRecommendation] = useState(null);
+  const [selectedRecommendationId, setSelectedRecommendationId] = useState(null);
   const [flyTarget, setFlyTarget] = useState(null);
+  const [plannedStations, setPlannedStations] = useState([]);
   const markerRefs = useRef([]);
 
   useEffect(() => {
@@ -880,6 +1209,21 @@ function App() {
     () => scoredDistricts.filter((district) => district.needScore >= 80).length,
     [scoredDistricts]
   );
+  const baselineCoveragePercent = useMemo(
+    () => computeCoveragePercent(coverageSamples, stations),
+    [coverageSamples, stations]
+  );
+  const liveCoveragePercent = useMemo(
+    () => computeCoveragePercent(coverageSamples, plannedNetworkStations),
+    [coverageSamples, plannedNetworkStations]
+  );
+  const selectedRecommendation = useMemo(
+    () =>
+      selectedRecommendationId == null
+        ? null
+        : scoredDistricts.find((district) => district.feature.properties.fid === selectedRecommendationId) ?? null,
+    [scoredDistricts, selectedRecommendationId]
+  );
 
   const isDistrictMode = mapMode === MAP_MODES.DISTRICTS;
   const isStationMode = mapMode === MAP_MODES.STATIONS;
@@ -888,7 +1232,7 @@ function App() {
 
   function handleRecommendationSelect(district) {
     const bounds = getRecommendationBounds(district.feature);
-    setSelectedRecommendation(district);
+    setSelectedRecommendationId(district.feature.properties.fid);
     setFlyTarget({
       bounds,
       latlng: district.centroid,
@@ -898,7 +1242,7 @@ function App() {
 
   function handleRecommendationReset() {
     if (!districtData) return;
-    setSelectedRecommendation(null);
+    setSelectedRecommendationId(null);
     setFlyTarget({
       bounds: L.geoJSON(districtData).getBounds().pad(0.06),
       _ts: Date.now(),
@@ -907,6 +1251,18 @@ function App() {
 
   function handleListItemClick(d) {
     handleRecommendationSelect(d);
+  }
+
+  function handlePlannerPlacement(plannedStation) {
+    setPlannedStations((current) => [...current, plannedStation]);
+  }
+
+  function handleRemoveLastPlanned() {
+    setPlannedStations((current) => current.slice(0, -1));
+  }
+
+  function handleClearPlanner() {
+    setPlannedStations([]);
   }
 
   return (
@@ -1033,6 +1389,7 @@ function App() {
               </p>
               <p className="rec-panel-intro">
                 Click a district on the map or in the list to inspect its charger gap.
+                Then click inside that district to place your own planned charger pins.
               </p>
 
               {scoredDistricts.length === 0 ? (
@@ -1048,6 +1405,20 @@ function App() {
                     <span className="rec-summary-label">Shown on map</span>
                     <strong>{criticalRecommendations.length}</strong>
                     <span>All critical districts</span>
+                  </div>
+                  <div className="rec-summary-chip">
+                    <span className="rec-summary-label">Coverage now</span>
+                    <strong>{liveCoveragePercent.toFixed(1)}%</strong>
+                    <span>
+                      {plannedStations.length
+                        ? `+${(liveCoveragePercent - baselineCoveragePercent).toFixed(1)} pts`
+                        : 'Existing network only'}
+                    </span>
+                  </div>
+                  <div className="rec-summary-chip">
+                    <span className="rec-summary-label">Planner pins</span>
+                    <strong>{plannedStations.length}</strong>
+                    <span>User-placed test sites</span>
                   </div>
                 </div>
               )}
@@ -1087,6 +1458,14 @@ function App() {
             isEnabled={isRecommendationMode}
             onReset={handleRecommendationReset}
           />
+          <PlannerClickController
+            coverageSamples={coverageSamples}
+            existingStations={stations}
+            isEnabled={isRecommendationMode}
+            onPlaceCandidate={handlePlannerPlacement}
+            plannedStations={plannedStations}
+            selectedDistrict={selectedRecommendation}
+          />
 
           <Pane name="districts" style={{ zIndex: 350 }}>
             {districtData && isDistrictMode && (
@@ -1115,18 +1494,21 @@ function App() {
             )}
             {isDistrictMode && <PassiveStationLayer stations={stations} />}
             {isRecommendationMode && (
-              selectedRecommendation ? (
-                <SelectedDistrictStationsLayer
-                  isStreetBasemap={isStreetBasemap}
-                  selectedDistrict={selectedRecommendation}
-                  stations={stations}
-                />
-              ) : (
-                <RecommendedPinsLayer
-                  recommendations={criticalRecommendations}
-                  markerRefs={markerRefs}
-                />
-              )
+              <>
+                {selectedRecommendation ? (
+                  <SelectedDistrictStationsLayer
+                    isStreetBasemap={isStreetBasemap}
+                    selectedDistrict={selectedRecommendation}
+                    stations={stations}
+                  />
+                ) : (
+                  <RecommendedPinsLayer
+                    recommendations={criticalRecommendations}
+                    markerRefs={markerRefs}
+                  />
+                )}
+                <PlannedStationsLayer plannedStations={plannedStations} />
+              </>
             )}
           </Pane>
         </MapContainer>
@@ -1152,6 +1534,15 @@ function App() {
               </div>
 
               <div className="rec-info-section">
+                <h3 className="rec-info-title">Planner logic</h3>
+                <ul className="rec-info-list">
+                  <li><strong>Suitable</strong>: the point creates a clear spacing gap and increases coverage.</li>
+                  <li><strong>Maybe</strong>: the point helps, but the improvement is moderate.</li>
+                  <li><strong>Not suitable</strong>: the point is too close to an existing or planned charger.</li>
+                </ul>
+              </div>
+
+              <div className="rec-info-section">
                 <h3 className="rec-info-title">Color meaning</h3>
                 <ul className="rec-color-list">
                   {NEED_SCORE_LEGEND.map((item) => (
@@ -1165,7 +1556,18 @@ function App() {
             </aside>
 
             {selectedRecommendation ? (
-              <RecommendationDetailCard district={selectedRecommendation} />
+              <>
+                <RecommendationDetailCard district={selectedRecommendation} />
+                <PlannerControlCard
+                  district={selectedRecommendation}
+                  networkCoverageAfter={liveCoveragePercent}
+                  networkCoverageBefore={baselineCoveragePercent}
+                  onClearPlanner={handleClearPlanner}
+                  onRemoveLastPlanned={handleRemoveLastPlanned}
+                  plannedCount={plannedStations.length}
+                  plannedStations={plannedStations}
+                />
+              </>
             ) : (
               <aside className="rec-side-card rec-list-overlay" aria-label="Critical district list">
                 <h3 className="rec-side-title">Critical districts</h3>

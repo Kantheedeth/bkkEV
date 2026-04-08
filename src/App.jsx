@@ -227,118 +227,6 @@ function findNearestStation(point, stations) {
   };
 }
 
-function createGridCellFeature(cell) {
-  const { south, north, west, east } = cell.bounds;
-  return {
-    type: 'Feature',
-    properties: {
-      radiusKm: cell.radiusKm,
-    },
-    geometry: {
-      type: 'Polygon',
-      coordinates: [[
-        [west, south],
-        [east, south],
-        [east, north],
-        [west, north],
-        [west, south],
-      ]],
-    },
-  };
-}
-
-function findLargestUncoveredArea(feature, stations, coverageRadiusKm = 3) {
-  const bounds = L.geoJSON(feature).getBounds();
-  if (!bounds.isValid()) return null;
-
-  const south = bounds.getSouth();
-  const north = bounds.getNorth();
-  const west = bounds.getWest();
-  const east = bounds.getEast();
-  const latSpan = Math.max(0.01, north - south);
-  const lngSpan = Math.max(0.01, east - west);
-  const latStep = Math.min(0.008, Math.max(0.0025, latSpan / 12));
-  const lngStep = Math.min(0.008, Math.max(0.0025, lngSpan / 12));
-  const sampledCells = [];
-
-  for (let row = 0, lat = south + latStep / 2; lat <= north; row++, lat += latStep) {
-    for (let col = 0, lng = west + lngStep / 2; lng <= east; col++, lng += lngStep) {
-      const point = { lat, lng };
-      if (!pointInGeometry(point, feature.geometry)) continue;
-
-      const nearestStationResult = findNearestStation([lat, lng], stations);
-      sampledCells.push({
-        row,
-        col,
-        center: [lat, lng],
-        radiusKm: nearestStationResult.distanceKm,
-        nearestStation: nearestStationResult.station,
-        bounds: {
-          south: lat - latStep / 2,
-          north: lat + latStep / 2,
-          west: lng - lngStep / 2,
-          east: lng + lngStep / 2,
-        },
-      });
-    }
-  }
-
-  if (!sampledCells.length) return null;
-
-  const uncoveredCells = sampledCells.filter((cell) => cell.radiusKm >= coverageRadiusKm);
-  const targetCells = uncoveredCells.length ? uncoveredCells : sampledCells;
-  const cellMap = new Map(targetCells.map((cell) => [`${cell.row}:${cell.col}`, cell]));
-  const visited = new Set();
-  const clusters = [];
-
-  for (const cell of targetCells) {
-    const key = `${cell.row}:${cell.col}`;
-    if (visited.has(key)) continue;
-
-    const queue = [cell];
-    const clusterCells = [];
-    visited.add(key);
-
-    while (queue.length) {
-      const current = queue.shift();
-      clusterCells.push(current);
-
-      const neighbors = [
-        [current.row - 1, current.col],
-        [current.row + 1, current.col],
-        [current.row, current.col - 1],
-        [current.row, current.col + 1],
-      ];
-
-      for (const [neighborRow, neighborCol] of neighbors) {
-        const neighborKey = `${neighborRow}:${neighborCol}`;
-        if (visited.has(neighborKey)) continue;
-        const neighbor = cellMap.get(neighborKey);
-        if (!neighbor) continue;
-        visited.add(neighborKey);
-        queue.push(neighbor);
-      }
-    }
-
-    const strongestCell = [...clusterCells].sort((a, b) => b.radiusKm - a.radiusKm)[0];
-    const averageLat =
-      clusterCells.reduce((sum, clusterCell) => sum + clusterCell.center[0], 0) / clusterCells.length;
-    const averageLng =
-      clusterCells.reduce((sum, clusterCell) => sum + clusterCell.center[1], 0) / clusterCells.length;
-
-    clusters.push({
-      center: [averageLat, averageLng],
-      peakCenter: strongestCell.center,
-      radiusKm: strongestCell.radiusKm,
-      nearestStation: strongestCell.nearestStation,
-      polygons: clusterCells.map(createGridCellFeature),
-      size: clusterCells.length,
-    });
-  }
-
-  return clusters.sort((a, b) => b.size - a.size || b.radiusKm - a.radiusKm)[0] ?? null;
-}
-
 function computeCentroid(geometry) {
   let latSum = 0, lngSum = 0, count = 0;
   const processRing = (ring) => {
@@ -360,16 +248,7 @@ function computeDistrictScores(districtData, stations) {
     const population = Number(props.final_population_english_Population) || 0;
     const noOfCounted = Number(props.noOfCounted) || 0;
     const centroid = computeCentroid(feature.geometry);
-    const largestUncoveredArea =
-      findLargestUncoveredArea(feature, stations) ??
-      {
-        center: centroid,
-        peakCenter: centroid,
-        radiusKm: findNearestStationDist(centroid, stations),
-        nearestStation: findNearestStation(centroid, stations).station,
-        polygons: [],
-        size: 1,
-      };
+    const nearestStationResult = findNearestStation(centroid, stations);
     
     // FIX 1: The km² Trap is removed. 
     // Now calculating "Chargers per 10,000 people" to measure actual human demand
@@ -381,11 +260,8 @@ function computeDistrictScores(districtData, stations) {
       population,
       noOfCounted,
       centroid,
-      gapCenter: largestUncoveredArea.center,
-      gapPeakCenter: largestUncoveredArea.peakCenter,
-      gapAreaPolygons: largestUncoveredArea.polygons,
-      gapAreaSize: largestUncoveredArea.size,
-      largestUncoveredArea,
+      nearestStation: nearestStationResult.station,
+      nearestStationKm: nearestStationResult.distanceKm,
       chargersPer10k,
     };
   });
@@ -405,8 +281,8 @@ function computeDistrictScores(districtData, stations) {
       const serviceScore =
         maxService > 0 ? (1 - d.chargersPer10k / maxService) * 100 : 100;
         
-      // 3. Buffer Score (0-100) based on the strongest uncovered area in the district
-      const nearestDist = d.largestUncoveredArea.radiusKm;
+      // 3. Buffer Score (0-100) from district center to nearest existing station
+      const nearestDist = d.nearestStationKm;
       const bufferScore = nearestDist >= 3 ? 100 : (nearestDist / 3) * 100;
       
       // FIX 3: The 30/40/30 Weights
@@ -421,9 +297,6 @@ function computeDistrictScores(districtData, stations) {
         popScore: Math.round(popScore),
         serviceScore: Math.round(serviceScore), // Renamed from coverageScore
         bufferScore: Math.round(bufferScore),
-        nearestStationKm: nearestDist,
-        gapRadiusKm: nearestDist,
-        nearestStation: d.largestUncoveredArea.nearestStation,
         needScore,
       };
     })
@@ -439,6 +312,7 @@ function createPulsingIcon(rank) {
     popupAnchor: [0, -64],
   });
 }
+
 
 // ─── Map sub-components ───────────────────────────────────────────────────────
 
@@ -655,75 +529,6 @@ function getRecommendationBounds(feature) {
   return bounds.isValid() ? bounds : null;
 }
 
-function RecommendationGapLayer({ selectedDistrict }) {
-  if (!selectedDistrict) return null;
-  const districtId = selectedDistrict.feature?.properties?.fid ?? selectedDistrict.name;
-
-  return (
-    <>
-      <GeoJSON
-        key={`selected-district-boundary-${districtId}`}
-        data={selectedDistrict.feature}
-        interactive={false}
-        style={{
-          color: '#7c2d12',
-          weight: 3,
-          fillColor: '#fb923c',
-          fillOpacity: 0.15,
-          dashArray: '10 6',
-        }}
-      />
-      {selectedDistrict.gapAreaPolygons?.length ? (
-        <GeoJSON
-          key={`selected-district-gap-polygons-${districtId}`}
-          data={{
-            type: 'FeatureCollection',
-            features: selectedDistrict.gapAreaPolygons,
-          }}
-          interactive={false}
-          style={() => ({
-            color: '#ea580c',
-            weight: 1.4,
-            fillColor: '#fb923c',
-            fillOpacity: 0.28,
-          })}
-        />
-      ) : (
-        <Circle
-          key={`selected-district-gap-circle-${districtId}`}
-          center={selectedDistrict.gapCenter}
-          radius={selectedDistrict.gapRadiusKm * 1000}
-          pathOptions={{
-            color: '#f97316',
-            weight: 3,
-            fillColor: '#fdba74',
-            fillOpacity: 0.16,
-          }}
-        />
-      )}
-      <CircleMarker
-        key={`selected-district-gap-marker-${districtId}`}
-        center={selectedDistrict.gapCenter}
-        radius={10}
-        bubblingMouseEvents={false}
-        pathOptions={{
-          color: '#7c2d12',
-          weight: 3,
-          fillColor: '#fb923c',
-          fillOpacity: 1,
-        }}
-      >
-        <Tooltip direction="top" offset={[0, -8]} opacity={1}>
-          <div className="rec-mini-popup">
-            <strong>{selectedDistrict.name}</strong>
-            <span>Largest uncovered area: {formatDistanceKm(selectedDistrict.gapRadiusKm)}</span>
-          </div>
-        </Tooltip>
-      </CircleMarker>
-    </>
-  );
-}
-
 function SelectedDistrictStationsLayer({ selectedDistrict, stations, isStreetBasemap }) {
   if (!selectedDistrict) return null;
 
@@ -895,12 +700,8 @@ function RecommendationDetailCard({ district }) {
 
         <dl className="rec-detail-list">
           <div>
-            <dt>Largest uncovered area</dt>
+            <dt>Main gap</dt>
             <dd>{formatDistanceKm(district.nearestStationKm)}</dd>
-          </div>
-          <div>
-            <dt>Uncovered cells</dt>
-            <dd>{district.gapAreaSize ?? 'N/A'}</dd>
           </div>
           <div>
             <dt>Nearest station</dt>
@@ -1230,12 +1031,6 @@ function App() {
                   markerRefs={markerRefs}
                 />
               )
-            )}
-          </Pane>
-
-          <Pane name="recommendation-gap" style={{ zIndex: 470 }}>
-            {isRecommendationMode && selectedRecommendation && (
-              <RecommendationGapLayer selectedDistrict={selectedRecommendation} />
             )}
           </Pane>
         </MapContainer>

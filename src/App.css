@@ -304,6 +304,41 @@
   display: none;
 }
 
+/* ── Rec mode sub-toggle row ─────────────────────────────────────────────── */
+
+.rec-sub-toggle {
+  margin-top: 8px;
+  margin-bottom: 2px;
+  width: 100%;
+}
+
+.mode-button.rec-heat-tab {
+  background: linear-gradient(135deg, #7f1d1d, #ef4444);
+  color: #fff;
+}
+
+/* ── Back button (rec mode, left panel) ─────────────────────────────────── */
+
+.rec-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 5px 10px;
+  border: 1px solid rgba(29, 78, 216, 0.22);
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.08);
+  color: #1d4ed8;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.rec-back-btn:hover {
+  background: rgba(59, 130, 246, 0.15);
+}
+
 /* ── Recommendation mode tab button ─────────────────────────────────────── */
 
 /* ── Recommendation side panel ───────────────────────────────────────────── */
@@ -512,7 +547,7 @@
   top: 18px;
   right: 18px;
   z-index: 1000;
-  width: min(270px, calc(100vw - 36px));
+  width: min(296px, calc(100vw - 36px));
   display: grid;
   gap: 8px;
 }
@@ -724,6 +759,495 @@
 @keyframes pin-ring {
   0% { opacity: 0.8; transform: scale(0.8); }
   100% { opacity: 0; transform: scale(1.8); }
+}
+
+/* ── Recommendation district tooltip ────────────────────────────────────── */
+
+.rec-district-tooltip {
+  border: 0 !important;
+  border-radius: 8px !important;
+  padding: 6px 10px !important;
+  background: rgba(16, 42, 67, 0.92) !important;
+  color: #f8fafc !important;
+  font-size: 0.7rem !important;
+  line-height: 1.5 !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22) !important;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.rec-district-tooltip::before {
+  display: none !important;
+}
+
+/* ── Recommended spot marker ─────────────────────────────────────────────── */
+
+.rec-spot-icon-wrapper {
+  background: transparent !important;
+  border: none !important;
+  overflow: visible !important;
+}
+
+.rec-spot-label-above {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 3px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: #1d4ed8;
+  color: #fff;
+  font-size: 0.62rem;
+  font-weight: 800;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 1px 4px rgba(29, 78, 216, 0.4);
+}
+
+.rec-spot-dot {
+  border-radius: 50%;
+  background: #3b82f6;
+  position: relative;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.55);
+}
+
+/* Ripple rings */
+.rec-spot-dot::before,
+.rec-spot-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.35);
+  animation: ripple 2s ease-out infinite;
+}
+
+.rec-spot-dot::after {
+  animation-delay: 0.5s;
+}
+
+@keyframes ripple {
+  0%   { transform: scale(1);   opacity: 1; }
+  100% { transform: scale(2.5); opacity: 0; }
+}
+
+/* Pulse intensity variants */
+.spot-pulse-strong::before { animation-duration: 1.4s; }
+.spot-pulse-strong::after  { animation-duration: 1.4s; animation-delay: 0.35s; }
+
+.spot-pulse-medium::before { animation-duration: 1.8s; }
+.spot-pulse-medium::after  { animation-duration: 1.8s; animation-delay: 0.45s; }
+
+.spot-pulse-light::before { animation-duration: 2.4s; }
+.spot-pulse-light::after  { animation-duration: 2.4s; animation-delay: 0.6s; }
+
+/* ── District detail panel ───────────────────────────────────────────────── */
+
+.rec-district-detail {
+  display: flex;
+  flex-direction: column;
+  max-height: 86vh;
+}
+
+.rdd-header {
+  display: grid;
+  gap: 6px;
+  padding-bottom: 2px;
+}
+
+.rdd-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rdd-district-name {
+  font-size: 0.9rem;
+  font-weight: 800;
+  color: #102a43;
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rdd-need-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rdd-label {
+  flex: 0 0 76px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: #486581;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.rdd-bar-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(16, 42, 67, 0.1);
+  overflow: hidden;
+}
+
+.rdd-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.5s ease;
+}
+
+.rdd-sub-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rdd-sub-label {
+  flex: 0 0 116px;
+  font-size: 0.63rem;
+  color: #486581;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rdd-sub-bar-track {
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(16, 42, 67, 0.08);
+  overflow: hidden;
+}
+
+.rdd-sub-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: #3b82f6;
+  transition: width 0.5s ease;
+}
+
+.rdd-sub-value {
+  flex: 0 0 36px;
+  font-size: 0.63rem;
+  font-weight: 700;
+  color: #102a43;
+  text-align: right;
+}
+
+.rdd-sub-weight {
+  flex: 0 0 28px;
+  font-size: 0.6rem;
+  color: #94a3b8;
+  text-align: right;
+}
+
+.rdd-stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.rdd-stat {
+  display: grid;
+  gap: 1px;
+  padding: 5px 7px;
+  border-radius: 8px;
+  background: rgba(16, 42, 67, 0.04);
+  border: 1px solid rgba(16, 42, 67, 0.07);
+}
+
+.rdd-stat-label {
+  font-size: 0.58rem;
+  color: #7b8794;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.rdd-stat-value {
+  font-size: 0.8rem;
+  font-weight: 800;
+  color: #102a43;
+}
+
+.rdd-divider {
+  height: 1px;
+  background: rgba(16, 42, 67, 0.1);
+  margin: 6px 0;
+}
+
+.rdd-section {
+  display: grid;
+  gap: 5px;
+}
+
+.rdd-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rdd-section-title {
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: #102a43;
+  letter-spacing: 0.02em;
+}
+
+.rdd-toggle-btn {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid rgba(16, 42, 67, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.7);
+  color: #334e68;
+  font-size: 0.62rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.rdd-toggle-btn:hover {
+  background: rgba(16, 42, 67, 0.06);
+}
+
+.rdd-empty {
+  margin: 0;
+  font-size: 0.65rem;
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.rdd-station-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 3px;
+  max-height: 100px;
+  overflow-y: auto;
+}
+
+.rdd-station-item {
+  font-size: 0.65rem;
+  color: #334e68;
+  padding: 3px 5px;
+  border-radius: 5px;
+  background: rgba(239, 68, 68, 0.05);
+  overflow-wrap: anywhere;
+}
+
+.rdd-spots-list {
+  display: grid;
+  gap: 6px;
+}
+
+.rdd-spot-item {
+  padding: 7px 9px;
+  border: 1px solid rgba(59, 130, 246, 0.15);
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.04);
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+
+.rdd-spot-item:hover {
+  background: rgba(59, 130, 246, 0.1);
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.12);
+}
+
+.rdd-spot-insufficient {
+  cursor: default;
+  background: rgba(16, 42, 67, 0.03);
+  border-color: rgba(16, 42, 67, 0.1);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rdd-spot-insufficient:hover {
+  background: rgba(16, 42, 67, 0.03);
+  box-shadow: none;
+}
+
+.rdd-spot-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.rdd-spot-rank {
+  flex: 0 0 auto;
+  font-size: 0.65rem;
+  font-weight: 800;
+  color: #7b8794;
+}
+
+.rdd-spot-rank-blue {
+  color: #1d4ed8;
+}
+
+.rdd-spot-bar {
+  flex: 1;
+}
+
+.rdd-spot-score {
+  flex: 0 0 auto;
+  font-size: 0.63rem;
+  font-weight: 700;
+  color: #1d4ed8;
+}
+
+.rdd-spot-coords {
+  font-size: 0.63rem;
+  color: #334e68;
+  font-family: monospace;
+  margin-bottom: 2px;
+}
+
+.rdd-spot-meta {
+  font-size: 0.63rem;
+  color: #486581;
+  font-weight: 600;
+}
+
+.rdd-spot-hint {
+  margin-top: 3px;
+  font-size: 0.58rem;
+  color: #1d4ed8;
+  font-weight: 600;
+  opacity: 0.7;
+}
+
+.rdd-spot-label {
+  font-size: 0.63rem;
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.rdd-export-btn {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid rgba(16, 42, 67, 0.16);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.7);
+  color: #102a43;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s;
+  text-align: center;
+}
+
+.rdd-export-btn:hover {
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 2px 8px rgba(16, 42, 67, 0.1);
+}
+
+.rdd-explain-toggle {
+  width: 100%;
+  padding: 6px 0;
+  border: none;
+  background: none;
+  color: #486581;
+  font-size: 0.68rem;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.15s;
+}
+
+.rdd-explain-toggle:hover {
+  color: #102a43;
+}
+
+.rdd-explain-body {
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(16, 42, 67, 0.04);
+  font-size: 0.63rem;
+  color: #486581;
+  line-height: 1.5;
+}
+
+.rdd-explain-body p {
+  margin: 0 0 5px;
+  color: #334e68;
+}
+
+.rdd-explain-body ul {
+  margin: 0 0 8px;
+  padding-left: 14px;
+  display: grid;
+  gap: 3px;
+}
+
+.rdd-explain-body li {
+  color: #486581;
+}
+
+/* ── Heatmap legend ──────────────────────────────────────────────────────── */
+
+.heatmap-legend {
+  position: absolute;
+  bottom: 28px;
+  left: 18px;
+  z-index: 1000;
+  min-width: 166px;
+  padding: 10px 12px;
+  border: 1px solid rgba(36, 64, 77, 0.14);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 6px 24px rgba(37, 61, 78, 0.14);
+  display: grid;
+  gap: 5px;
+}
+
+.heatmap-legend-title {
+  margin: 0;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #102a43;
+}
+
+.heatmap-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.heatmap-legend-swatch {
+  flex: 0 0 12px;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(16, 42, 67, 0.12);
+}
+
+.heatmap-legend-label {
+  font-size: 0.65rem;
+  color: #334e68;
+  font-weight: 600;
+}
+
+.heatmap-legend-note {
+  margin: 2px 0 0;
+  font-size: 0.58rem;
+  color: #7b8794;
+  line-height: 1.4;
+  padding-top: 4px;
+  border-top: 1px solid rgba(16, 42, 67, 0.08);
 }
 
 /* ── Mobile ──────────────────────────────────────────────────────────────── */

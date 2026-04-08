@@ -413,6 +413,11 @@
   transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
 }
 
+.rec-item-top3 {
+  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(255, 248, 248, 0.82);
+}
+
 .rec-item:hover,
 .rec-item:focus-visible {
   background: rgba(255, 255, 255, 0.92);
@@ -433,6 +438,23 @@
   font-weight: 800;
   color: #486581;
   padding-top: 2px;
+}
+
+.rec-rank-top3 {
+  color: #dc2626;
+}
+
+.rec-live-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #16a34a;
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
 }
 
 .rec-title-block {
@@ -468,6 +490,19 @@
   font-size: 0.72rem;
   font-weight: 800;
   color: #fff;
+}
+
+.rec-score-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.rec-score-delta {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
 }
 
 .rec-bar-track {

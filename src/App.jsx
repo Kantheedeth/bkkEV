@@ -637,6 +637,16 @@ function PlannerClickController({
   return null;
 }
 
+function MajorRoadLayer({ isStreetBasemap, roadData }) {
+  const style = {
+    color: isStreetBasemap ? '#94a3b8' : '#e2e8f0',
+    weight: 1.2,
+    opacity: isStreetBasemap ? 0.55 : 0.45,
+    fillOpacity: 0,
+  };
+  return <GeoJSON data={roadData} interactive={false} style={() => style} />;
+}
+
 function districtStyle(feature, isDistrictMode) {
   return {
     color: '#1f3c48',
@@ -992,24 +1002,41 @@ function PlannedStationsLayer({ plannedStations }) {
   });
 }
 
-function RecommendationDetailCard({ district }) {
+function ScoreDelta({ live, baseline }) {
+  const delta = live - baseline;
+  if (delta === 0) return null;
+  const label = delta > 0 ? `+${delta}` : `${delta}`;
+  const color = delta < 0 ? '#16a34a' : '#dc2626';
+  return <span className="rec-score-delta" style={{ color }}>{label}</span>;
+}
+
+function RecommendationDetailCard({ baselineNeedScore, district }) {
   const strongestDriver = getStrongestNeedDriver(district);
+  const hasChanged = baselineNeedScore !== null && district.needScore !== baselineNeedScore;
 
   return (
     <aside className="rec-side-card rec-list-overlay" aria-label="Selected district details">
-      <h3 className="rec-side-title">Selected district</h3>
+      <h3 className="rec-side-title">
+        Selected district
+        {hasChanged && <span className="rec-live-badge">Updated</span>}
+      </h3>
       <div className="rec-detail-card">
         <div className="rec-detail-header">
           <div className="rec-title-block">
             <span className="rec-name">{district.name}</span>
             <span className="rec-subtitle">{getNeedLevel(district.needScore)} • {strongestDriver.label}</span>
           </div>
-          <span
-            className="rec-score-badge"
-            style={{ backgroundColor: getNeedScoreColor(district.needScore) }}
-          >
-            {district.needScore}/100
-          </span>
+          <div className="rec-score-group">
+            <span
+              className="rec-score-badge"
+              style={{ backgroundColor: getNeedScoreColor(district.needScore) }}
+            >
+              {district.needScore}/100
+            </span>
+            {baselineNeedScore !== null && (
+              <ScoreDelta live={district.needScore} baseline={baselineNeedScore} />
+            )}
+          </div>
         </div>
 
         <div className="rec-bar-track">
@@ -1024,11 +1051,11 @@ function RecommendationDetailCard({ district }) {
 
         <dl className="rec-detail-list">
           <div>
-            <dt>Main gap</dt>
+            <dt>Nearest station</dt>
             <dd>{formatDistanceKm(district.nearestStationKm)}</dd>
           </div>
           <div>
-            <dt>Nearest station</dt>
+            <dt>Nearest station name</dt>
             <dd>{district.nearestStation?.name ?? 'N/A'}</dd>
           </div>
           <div>
@@ -1036,7 +1063,7 @@ function RecommendationDetailCard({ district }) {
             <dd>{formatInteger(district.population)}</dd>
           </div>
           <div>
-            <dt>Stations in network</dt>
+            <dt>Stations in district</dt>
             <dd>{formatInteger(district.noOfCounted)}</dd>
           </div>
           <div>
@@ -1201,13 +1228,29 @@ function App() {
     () => computeDistrictScores(districtData, stations, roadPoints),
     [districtData, roadPoints, stations]
   );
-  const criticalRecommendations = useMemo(
-    () => scoredDistricts.filter((district) => district.needScore >= 80),
-    [scoredDistricts]
+  const coverageSamples = useMemo(
+    () => buildCoverageSamplePoints(districtData),
+    [districtData]
+  );
+  const plannedNetworkStations = useMemo(
+    () => [...stations, ...plannedStations],
+    [stations, plannedStations]
+  );
+  // Recompute scores using the live network (existing + planned) so the list
+  // updates whenever the user places a station in the planner.
+  const liveScoredDistricts = useMemo(
+    () => plannedStations.length > 0
+      ? computeDistrictScores(districtData, plannedNetworkStations, roadPoints)
+      : scoredDistricts,
+    [districtData, plannedNetworkStations, plannedStations.length, roadPoints, scoredDistricts]
+  );
+  const top5Recommendations = useMemo(
+    () => liveScoredDistricts.slice(0, 5),
+    [liveScoredDistricts]
   );
   const criticalCount = useMemo(
-    () => scoredDistricts.filter((district) => district.needScore >= 80).length,
-    [scoredDistricts]
+    () => liveScoredDistricts.filter((district) => district.needScore >= 80).length,
+    [liveScoredDistricts]
   );
   const baselineCoveragePercent = useMemo(
     () => computeCoveragePercent(coverageSamples, stations),
@@ -1221,7 +1264,14 @@ function App() {
     () =>
       selectedRecommendationId == null
         ? null
-        : scoredDistricts.find((district) => district.feature.properties.fid === selectedRecommendationId) ?? null,
+        : liveScoredDistricts.find((district) => district.feature.properties.fid === selectedRecommendationId) ?? null,
+    [liveScoredDistricts, selectedRecommendationId]
+  );
+  // Baseline score from the original (no planned stations) scoring, for delta display.
+  const selectedBaselineNeedScore = useMemo(
+    () => selectedRecommendationId == null
+      ? null
+      : (scoredDistricts.find((d) => d.feature.properties.fid === selectedRecommendationId)?.needScore ?? null),
     [scoredDistricts, selectedRecommendationId]
   );
 
@@ -1392,7 +1442,7 @@ function App() {
                 Then click inside that district to place your own planned charger pins.
               </p>
 
-              {scoredDistricts.length === 0 ? (
+              {liveScoredDistricts.length === 0 ? (
                 <p className="status-message">Calculating scores…</p>
               ) : (
                 <div className="rec-summary-strip">
@@ -1402,9 +1452,9 @@ function App() {
                     <span>Need score 80+</span>
                   </div>
                   <div className="rec-summary-chip">
-                    <span className="rec-summary-label">Shown on map</span>
-                    <strong>{criticalRecommendations.length}</strong>
-                    <span>All critical districts</span>
+                    <span className="rec-summary-label">Top priorities</span>
+                    <strong>{top5Recommendations.length}</strong>
+                    <span>Highest need districts</span>
                   </div>
                   <div className="rec-summary-chip">
                     <span className="rec-summary-label">Coverage now</span>
@@ -1467,6 +1517,12 @@ function App() {
             selectedDistrict={selectedRecommendation}
           />
 
+          <Pane name="roads" style={{ zIndex: 300 }}>
+            {rawMajorRoads && (
+              <MajorRoadLayer isStreetBasemap={isStreetBasemap} roadData={rawMajorRoads} />
+            )}
+          </Pane>
+
           <Pane name="districts" style={{ zIndex: 350 }}>
             {districtData && isDistrictMode && (
               <DistrictLayer districtData={districtData} isDistrictMode={isDistrictMode} />
@@ -1482,7 +1538,7 @@ function App() {
               <RecommendationDistrictLayer
                 districtData={districtData}
                 onSelectDistrict={handleRecommendationSelect}
-                scoredDistricts={scoredDistricts}
+                scoredDistricts={liveScoredDistricts}
                 selectedDistrictId={selectedRecommendation?.feature.properties.fid}
               />
             )}
@@ -1503,7 +1559,7 @@ function App() {
                   />
                 ) : (
                   <RecommendedPinsLayer
-                    recommendations={criticalRecommendations}
+                    recommendations={top5Recommendations}
                     markerRefs={markerRefs}
                   />
                 )}
@@ -1557,7 +1613,10 @@ function App() {
 
             {selectedRecommendation ? (
               <>
-                <RecommendationDetailCard district={selectedRecommendation} />
+                <RecommendationDetailCard
+                  baselineNeedScore={selectedBaselineNeedScore}
+                  district={selectedRecommendation}
+                />
                 <PlannerControlCard
                   district={selectedRecommendation}
                   networkCoverageAfter={liveCoveragePercent}
@@ -1569,26 +1628,32 @@ function App() {
                 />
               </>
             ) : (
-              <aside className="rec-side-card rec-list-overlay" aria-label="Critical district list">
-                <h3 className="rec-side-title">Critical districts</h3>
-                {criticalRecommendations.length === 0 ? (
-                  <p className="rec-side-empty">No districts are currently in the critical range.</p>
+              <aside className="rec-side-card rec-list-overlay" aria-label="Top district recommendations">
+                <h3 className="rec-side-title">
+                  Top 5 priority districts
+                  {plannedStations.length > 0 && (
+                    <span className="rec-live-badge">Live</span>
+                  )}
+                </h3>
+                {top5Recommendations.length === 0 ? (
+                  <p className="rec-side-empty">No districts scored yet.</p>
                 ) : (
                   <div className="rec-list-scroll">
                     <ol className="rec-list">
-                    {criticalRecommendations.map((d, i) => {
+                    {top5Recommendations.map((d, i) => {
                       const strongestDriver = getStrongestNeedDriver(d);
+                      const isTop3 = i < 3;
                       return (
                         <li
                           key={d.feature.properties.fid}
-                          className="rec-item"
+                          className={`rec-item${isTop3 ? ' rec-item-top3' : ''}`}
                           role="button"
                           tabIndex={0}
                           onClick={() => handleListItemClick(d)}
                           onKeyDown={(e) => e.key === 'Enter' && handleListItemClick(d)}
                         >
                           <div className="rec-item-header">
-                            <span className="rec-rank">#{i + 1}</span>
+                            <span className={`rec-rank${isTop3 ? ' rec-rank-top3' : ''}`}>#{i + 1}</span>
                             <div className="rec-title-block">
                               <span className="rec-name">{d.name}</span>
                               <span className="rec-subtitle">

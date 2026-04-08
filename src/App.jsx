@@ -17,6 +17,7 @@ import 'leaflet/dist/leaflet.css';
 import './App.css';
 import districtInfoDataUrl from './assets/data/districtInfo.geojson?url';
 import evStationsDataUrl from './assets/data/evStations.geojson?url';
+import majorRoadDataUrl from './assets/data/majorRoad.geojson?url';
 
 const MAP_MODES = {
   DISTRICTS: 'districts',
@@ -28,6 +29,10 @@ const BASEMAPS = {
   SATELLITE: 'satellite',
 };
 const DISTRICT_LABEL_MIN_ZOOM = 11.5;
+const BUFFER_TARGET_KM = 3;
+const ROAD_ACCESS_DECAY_KM = 5;
+const ROAD_SAMPLE_STRIDE = 10;
+const ROAD_SAMPLE_LIMIT = 20000;
 const DISTRICT_COVERAGE_LEGEND = [
   { color: '#005f73', label: '12.00 and above' },
   { color: '#0a9396', label: '8.00 to 11.99' },
@@ -175,6 +180,11 @@ function getStrongestNeedDriver(district) {
       label: 'Far from existing stations',
       description: 'The nearest existing charger is relatively far from this district.',
     },
+    {
+      score: district.roadAccessScore,
+      label: 'Good major road access',
+      description: 'This district center is relatively close to the major road network.',
+    },
   ];
 
   return drivers.sort((a, b) => b.score - a.score)[0];
@@ -255,6 +265,67 @@ function findNearestStation(point, stations) {
   };
 }
 
+function normalizeMajorRoadPoints(rawData) {
+  const points = [];
+  const features = rawData?.features ?? [];
+
+  for (const feature of features) {
+    if (points.length >= ROAD_SAMPLE_LIMIT) break;
+    const geometry = feature?.geometry;
+    if (!geometry) continue;
+
+    if (geometry.type === 'LineString') {
+      const line = geometry.coordinates ?? [];
+      for (let i = 0; i < line.length; i += ROAD_SAMPLE_STRIDE) {
+        if (points.length >= ROAD_SAMPLE_LIMIT) break;
+        const [lng, lat] = line[i] ?? [];
+        if (Number.isFinite(lat) && Number.isFinite(lng)) points.push([lat, lng]);
+      }
+      const [endLng, endLat] = line[line.length - 1] ?? [];
+      if (
+        points.length < ROAD_SAMPLE_LIMIT &&
+        Number.isFinite(endLat) &&
+        Number.isFinite(endLng)
+      ) {
+        points.push([endLat, endLng]);
+      }
+      continue;
+    }
+
+    if (geometry.type === 'MultiLineString') {
+      const lines = geometry.coordinates ?? [];
+      for (const line of lines) {
+        for (let i = 0; i < line.length; i += ROAD_SAMPLE_STRIDE) {
+          if (points.length >= ROAD_SAMPLE_LIMIT) break;
+          const [lng, lat] = line[i] ?? [];
+          if (Number.isFinite(lat) && Number.isFinite(lng)) points.push([lat, lng]);
+        }
+        const [endLng, endLat] = line[line.length - 1] ?? [];
+        if (
+          points.length < ROAD_SAMPLE_LIMIT &&
+          Number.isFinite(endLat) &&
+          Number.isFinite(endLng)
+        ) {
+          points.push([endLat, endLng]);
+        }
+        if (points.length >= ROAD_SAMPLE_LIMIT) break;
+      }
+    }
+  }
+
+  return points;
+}
+
+function findNearestRoadDist(point, roadPoints) {
+  if (!roadPoints.length) return Infinity;
+  let minDistance = Infinity;
+  for (const [roadLat, roadLng] of roadPoints) {
+    const distance = haversineKm(point[0], point[1], roadLat, roadLng);
+    if (distance < minDistance) minDistance = distance;
+  }
+  return minDistance;
+}
+
 function computeCentroid(geometry) {
   let latSum = 0, lngSum = 0, count = 0;
   const processRing = (ring) => {
@@ -268,8 +339,8 @@ function computeCentroid(geometry) {
   return count > 0 ? [latSum / count, lngSum / count] : [13.75, 100.5];
 }
 
-function computeDistrictScores(districtData, stations) {
-  if (!districtData || !districtData.features?.length || !stations.length) return [];
+function computeDistrictScores(districtData, stations, roadPoints) {
+  if (!districtData || !stations.length) return [];
 
   const raw = districtData.features.map((feature) => {
     const props = feature.properties;
@@ -280,6 +351,7 @@ function computeDistrictScores(districtData, stations) {
     const noOfCounted = stationsInDistrict.length;
     const centroid = computeCentroid(feature.geometry);
     const nearestStationResult = findNearestStation(centroid, stations);
+    const nearestRoadKm = findNearestRoadDist(centroid, roadPoints);
     
     // FIX 1: The km² Trap is removed. 
     // Now calculating "Chargers per 10,000 people" to measure actual human demand
@@ -293,6 +365,7 @@ function computeDistrictScores(districtData, stations) {
       centroid,
       nearestStation: nearestStationResult.station,
       nearestStationKm: nearestStationResult.distanceKm,
+      nearestRoadKm,
       chargersPer10k,
     };
   });
@@ -315,13 +388,24 @@ function computeDistrictScores(districtData, stations) {
       // 3. Buffer Score (0-100) from district center to nearest existing station
       const nearestDist = d.nearestStationKm;
       const bufferScore =
-        nearestDist >= BUFFER_RADIUS_KM ? 100 : (nearestDist / BUFFER_RADIUS_KM) * 100;
-      
-      // FIX 3: The 30/40/30 Weights
-      // 30% Population Demand, 40% Accessibility/Buffer, 30% Service Ratio
+        nearestDist >= BUFFER_TARGET_KM ? 100 : (nearestDist / BUFFER_TARGET_KM) * 100;
+
+      // 4. Road Access Score (0-100) -> Closer to major roads gets higher score
+      const roadScoreRaw = Number.isFinite(d.nearestRoadKm)
+        ? ((ROAD_ACCESS_DECAY_KM - d.nearestRoadKm) / ROAD_ACCESS_DECAY_KM) * 100
+        : 0;
+      const roadAccessScore = Math.max(0, Math.min(100, roadScoreRaw));
+
+      // Need score weights:
+      // 25% Population + 25% Service + 30% Buffer + 20% Major road access
       const needScore = Math.min(
         100,
-        Math.round(popScore * 0.3 + serviceScore * 0.3 + bufferScore * 0.4)
+        Math.round(
+          popScore * 0.25 +
+            serviceScore * 0.25 +
+            bufferScore * 0.3 +
+            roadAccessScore * 0.2
+        )
       );
       
       return {
@@ -329,6 +413,7 @@ function computeDistrictScores(districtData, stations) {
         popScore: Math.round(popScore),
         serviceScore: Math.round(serviceScore), // Renamed from coverageScore
         bufferScore: Math.round(bufferScore),
+        roadAccessScore: Math.round(roadAccessScore),
         needScore,
       };
     })
@@ -958,12 +1043,17 @@ function RecommendationDetailCard({ district }) {
             <dt>Chargers / 10k</dt>
             <dd>{district.chargersPer10k.toFixed(2)}</dd>
           </div>
+          <div>
+            <dt>To major road</dt>
+            <dd>{formatDistanceKm(district.nearestRoadKm)}</dd>
+          </div>
         </dl>
 
         <div className="rec-metrics rec-detail-metrics">
           <span className="rec-pill">Pop {district.popScore}</span>
           <span className="rec-pill">Service {district.serviceScore}</span>
           <span className="rec-pill">Buffer {district.bufferScore}</span>
+          <span className="rec-pill">Road {district.roadAccessScore}</span>
         </div>
 
         <p className="rec-detail-hint">Click outside the study area to clear this district and return to the full list.</p>
@@ -1067,6 +1157,7 @@ function PlannerControlCard({
 function App() {
   const [districtData, setDistrictData] = useState(null);
   const [rawStations, setRawStations] = useState(null);
+  const [rawMajorRoads, setRawMajorRoads] = useState(null);
   const [loadError, setLoadError] = useState('');
   const [mapMode, setMapMode] = useState(MAP_MODES.STATIONS);
   const [basemap, setBasemap] = useState(BASEMAPS.STREET);
@@ -1078,22 +1169,25 @@ function App() {
   useEffect(() => {
     async function loadMapData() {
       try {
-        const [districtResponse, stationResponse] = await Promise.all([
+        const [districtResponse, stationResponse, majorRoadResponse] = await Promise.all([
           fetch(districtInfoDataUrl),
           fetch(evStationsDataUrl),
+          fetch(majorRoadDataUrl),
         ]);
 
-        if (!districtResponse.ok || !stationResponse.ok) {
-          throw new Error('Failed to load district or station GeoJSON.');
+        if (!districtResponse.ok || !stationResponse.ok || !majorRoadResponse.ok) {
+          throw new Error('Failed to load district, station, or major road GeoJSON.');
         }
 
-        const [districtJson, stationJson] = await Promise.all([
+        const [districtJson, stationJson, majorRoadJson] = await Promise.all([
           districtResponse.json(),
           stationResponse.json(),
+          majorRoadResponse.json(),
         ]);
 
         setDistrictData(districtJson);
         setRawStations(stationJson);
+        setRawMajorRoads(majorRoadJson);
       } catch (error) {
         setLoadError(error instanceof Error ? error.message : 'Failed to load map data.');
       }
@@ -1102,14 +1196,10 @@ function App() {
   }, []);
 
   const stations = useMemo(() => normalizeStations(rawStations), [rawStations]);
-  const coverageSamples = useMemo(() => buildCoverageSamplePoints(districtData), [districtData]);
-  const plannedNetworkStations = useMemo(
-    () => [...stations, ...plannedStations],
-    [stations, plannedStations]
-  );
+  const roadPoints = useMemo(() => normalizeMajorRoadPoints(rawMajorRoads), [rawMajorRoads]);
   const scoredDistricts = useMemo(
-    () => computeDistrictScores(districtData, plannedNetworkStations),
-    [districtData, plannedNetworkStations]
+    () => computeDistrictScores(districtData, stations, roadPoints),
+    [districtData, roadPoints, stations]
   );
   const criticalRecommendations = useMemo(
     () => scoredDistricts.filter((district) => district.needScore >= 80),
@@ -1245,8 +1335,8 @@ function App() {
 
           {/* ── Status messages ── */}
           {loadError ? <p className="status-message error">{loadError}</p> : null}
-          {!loadError && (!districtData || !stations.length) ? (
-            <p className="status-message">Loading district borders and EV stations...</p>
+          {!loadError && (!districtData || !stations.length || !roadPoints.length) ? (
+            <p className="status-message">Loading district borders, EV stations, and major roads...</p>
           ) : null}
           {districtData && stations.length && !isRecommendationMode ? (
             <p className="status-message">
@@ -1433,12 +1523,13 @@ function App() {
                   indicate districts that are more likely to need additional charging stations.
                 </p>
                 <ul className="rec-info-list">
-                  <li><strong>Population (30%)</strong>: more residents increase priority.</li>
-                  <li><strong>Service gap (30%)</strong>: fewer chargers per 10,000 people increase priority.</li>
-                  <li><strong>Buffer zone (40%)</strong>: districts farther than 3 km from the nearest station rank higher.</li>
+                  <li><strong>Population (25%)</strong>: more residents increase priority.</li>
+                  <li><strong>Service gap (25%)</strong>: fewer chargers per 10,000 people increase priority.</li>
+                  <li><strong>Buffer zone (30%)</strong>: districts farther from existing stations rank higher.</li>
+                  <li><strong>Major road access (20%)</strong>: districts closer to main roads rank higher.</li>
                 </ul>
                 <code className="rec-info-code">
-                  Need Score = (Population x 0.3) + (Service x 0.3) + (Buffer x 0.4)
+                  Need Score = (Pop x 0.25) + (Service x 0.25) + (Buffer x 0.3) + (Road x 0.2)
                 </code>
               </div>
 
@@ -1524,6 +1615,7 @@ function App() {
                             <span className="rec-pill">Pop {d.popScore}</span>
                             <span className="rec-pill">Service {d.serviceScore}</span>
                             <span className="rec-pill">Buffer {d.bufferScore}</span>
+                            <span className="rec-pill">Road {d.roadAccessScore}</span>
                             <span className="rec-pill">{formatDistanceKm(d.nearestStationKm)} away</span>
                             <span className="rec-action-hint">View on map</span>
                           </div>
